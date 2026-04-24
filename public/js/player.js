@@ -117,8 +117,18 @@ function togglePlay() {
   updatePlayButton();
 }
 
+function shuffleQueue() {
+  // Fisher-Yates shuffle
+  for (let i = queue.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [queue[i], queue[j]] = [queue[j], queue[i]];
+  }
+  queueIndex = 0;
+}
+
 function toggleShuffle() {
   playMode = playMode === 'shuffle' ? 'off' : 'shuffle';
+  if (playMode === 'shuffle') shuffleQueue();
   shuffleBtn.classList.toggle('active', playMode === 'shuffle');
   window.showToast(playMode === 'shuffle' ? '随机播放已开启' : '随机播放已关闭');
 }
@@ -189,7 +199,10 @@ progressTrack.addEventListener('pointermove', e => {
   if (e.buttons) seekFromEvent(e);
 });
 
-audio.addEventListener('timeupdate', updateProgress);
+audio.addEventListener('timeupdate', () => {
+  updateProgress();
+  window.dispatchEvent(new CustomEvent('timeupdate', { detail: audio.currentTime }));
+});
 audio.addEventListener('ended', () => {
   if (playMode === 'one') {
     audio.currentTime = 0;
@@ -200,6 +213,10 @@ audio.addEventListener('ended', () => {
 });
 audio.addEventListener('play', updatePlayButton);
 audio.addEventListener('pause', updatePlayButton);
+audio.addEventListener('error', () => {
+  window.showToast('播放出错，自动跳到下一首');
+  playNext();
+});
 
 // 恢复播放状态
 export async function restorePlayback() {
