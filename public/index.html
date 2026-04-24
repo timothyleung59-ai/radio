@@ -134,6 +134,13 @@
     </div>
   </div>
 
+  <!-- DJ 语音沉浸模式 -->
+  <div class="voice-mode-overlay" id="voiceOverlay" style="display:none">
+    <button class="voice-close" id="voiceClose">✕</button>
+    <canvas class="voice-wave-canvas" id="voiceWaveCanvas" width="400" height="120"></canvas>
+    <div class="voice-text" id="voiceText"></div>
+  </div>
+
   <div class="toast" id="toast"></div>
 
   <script type="module" src="js/app.js"></script>
