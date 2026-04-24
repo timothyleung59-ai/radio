@@ -1,6 +1,7 @@
 // public/js/app.js
 import { restorePlayback } from './player.js';
 import { initVisual, extractColors } from './visual.js';
+import { updateLyrics } from './lyrics.js';
 
 console.log('Claudio FM 加载中...');
 
@@ -22,4 +23,9 @@ restorePlayback();
 window.addEventListener('songchange', (e) => {
   const song = e.detail;
   if (song.cover) extractColors(song.cover);
+});
+
+// 歌词同步更新
+window.addEventListener('timeupdate', (e) => {
+  updateLyrics(e.detail);
 });
