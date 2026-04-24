@@ -2,6 +2,7 @@
 import { restorePlayback } from './player.js';
 import { initVisual, extractColors } from './visual.js';
 import { updateLyrics } from './lyrics.js';
+import { loadChatHistory } from './chat.js';
 
 console.log('Claudio FM 加载中...');
 
@@ -29,3 +30,6 @@ window.addEventListener('songchange', (e) => {
 window.addEventListener('timeupdate', (e) => {
   updateLyrics(e.detail);
 });
+
+// 加载聊天历史
+loadChatHistory();
