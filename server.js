@@ -4,6 +4,7 @@ const path = require('path');
 const cors = require('cors');
 const fs = require('fs');
 const Database = require('better-sqlite3');
+const Anthropic = require('@anthropic-ai/sdk');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -233,6 +234,152 @@ app.post('/api/config/:filename', (req, res) => {
   if (!allowed.includes(req.params.filename)) return res.status(400).json({ error: '不允许的文件' });
   fs.writeFileSync(path.join(configDir, req.params.filename), req.body.content || '');
   res.json({ ok: true });
+});
+
+// ========== 配置文件热加载 ==========
+let configCache = {};
+
+function loadConfigFiles() {
+  const files = ['agent.md', 'taste.md', 'routines.md', 'moodrules.md'];
+  for (const f of files) {
+    const fp = path.join(configDir, f);
+    configCache[f.replace('.md', '')] = fs.existsSync(fp) ? fs.readFileSync(fp, 'utf-8') : '';
+  }
+}
+loadConfigFiles();
+
+// 文件监听热重载
+fs.watch(configDir, (event, filename) => {
+  if (filename && filename.endsWith('.md')) {
+    loadConfigFiles();
+    console.log(`配置文件 ${filename} 已重新加载`);
+  }
+});
+
+function buildSystemPrompt(currentSong, chatHistory) {
+  const parts = [];
+  if (configCache.agent) parts.push(configCache.agent);
+  if (configCache.taste) parts.push(`## 音乐品味\n${configCache.taste}`);
+  if (configCache.routines) parts.push(`## 行为习惯\n${configCache.routines}`);
+  if (configCache.moodrules) parts.push(`## 情绪规则\n${configCache.moodrules}`);
+
+  if (currentSong) {
+    parts.push(`## 当前播放\n歌曲：${currentSong.name}，艺术家：${currentSong.artist}，专辑：${currentSong.album || '未知'}`);
+  }
+
+  parts.push(`## 回复格式
+你必须以 JSON 格式回复，结构如下：
+{
+  "say": "你对用户说的话",
+  "reason": "推荐理由（如果是推荐歌曲）",
+  "play": [{"id": "网易云歌曲ID", "name": "歌曲名", "artist": "艺术家", "album": "专辑", "cover": "封面URL"}],
+  "segue": "你想用语音说的内容（歌曲赏析、故事等，可以为空）"
+}
+只返回 JSON，不要包裹在 markdown 代码块中。`);
+
+  return parts.join('\n\n');
+}
+
+// ========== 消息分流 ==========
+const simpleCommands = {
+  '下一首': () => ({ action: 'next' }),
+  '上一首': () => ({ action: 'prev' }),
+  '暂停': () => ({ action: 'pause' }),
+  '随机播放': () => ({ action: 'shuffle' }),
+};
+
+const exactCommands = {
+  '播放': () => ({ action: 'play' }),
+};
+
+app.post('/api/dispatch', async (req, res) => {
+  const { message, currentSong } = req.body;
+
+  // 精确指令检测
+  if (exactCommands[message]) {
+    return res.json({ type: 'command', ...exactCommands[message]() });
+  }
+
+  // 包含式指令检测
+  for (const [keyword, handler] of Object.entries(simpleCommands)) {
+    if (message.includes(keyword)) {
+      return res.json({ type: 'command', ...handler() });
+    }
+  }
+
+  // 音乐搜索检测
+  if (message.startsWith('搜索') || (message.startsWith('播放') && message.length > 2)) {
+    const keyword = message.replace(/^(搜索|播放)/, '').trim();
+    if (keyword) {
+      return res.json({ type: 'music_search', keyword });
+    }
+  }
+
+  // 默认走 Claude
+  try {
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+    // 获取聊天历史
+    const history = db.prepare('SELECT * FROM chat_messages ORDER BY id DESC LIMIT 20').all().reverse();
+
+    const messages = history.map(h => ({
+      role: h.role,
+      content: h.content
+    }));
+    messages.push({ role: 'user', content: message });
+
+    const systemPrompt = buildSystemPrompt(currentSong, history);
+
+    const stream = await anthropic.messages.stream({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1024,
+      system: systemPrompt,
+      messages
+    });
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+
+    let fullContent = '';
+    stream.on('text', (text) => {
+      fullContent += text;
+      res.write(`data: ${JSON.stringify({ type: 'text', text })}\n\n`);
+    });
+
+    stream.on('end', () => {
+      // 保存消息
+      db.prepare('INSERT INTO chat_messages (role, content) VALUES (?, ?)').run('user', message);
+
+      // 尝试解析结构化回复
+      let parsed = null;
+      try {
+        parsed = JSON.parse(fullContent);
+      } catch(e) {
+        // 非 JSON 回复，当作纯文本
+        parsed = { say: fullContent, reason: '', play: [], segue: '' };
+      }
+
+      // 提取歌曲卡片
+      const songCards = parsed.play || [];
+
+      db.prepare('INSERT INTO chat_messages (role, content, song_cards) VALUES (?, ?, ?)')
+        .run('assistant', fullContent, JSON.stringify(songCards));
+
+      res.write(`data: ${JSON.stringify({ type: 'done', parsed, songCards })}\n\n`);
+      res.end();
+    });
+
+    stream.on('error', (err) => {
+      console.error('Claude API 错误:', err);
+      res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
+      res.end();
+    });
+
+  } catch (err) {
+    console.error('Claude API 错误:', err);
+    res.status(500).json({ type: 'error', message: err.message });
+  }
 });
 
 app.listen(PORT, () => {
