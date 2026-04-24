@@ -5,7 +5,7 @@ import { updateLyrics } from './lyrics.js';
 import { loadChatHistory } from './chat.js';
 import './panels.js';
 
-console.log('Claudio FM 加载中...');
+console.log('Claudio FM 启动中...');
 
 // Toast 工具
 window.showToast = function(msg, duration = 2000) {
@@ -15,22 +15,28 @@ window.showToast = function(msg, duration = 2000) {
   setTimeout(() => toast.classList.remove('show'), duration);
 };
 
-// 初始化视觉系统
-initVisual();
+// 初始化
+async function init() {
+  try {
+    initVisual();
+    await restorePlayback();
+    await loadChatHistory();
+    console.log('Claudio FM 初始化完成');
+  } catch (err) {
+    console.error('初始化失败:', err);
+    window.showToast('初始化失败，请刷新重试');
+  }
+}
 
-// 恢复上次播放状态
-restorePlayback();
+init();
 
-// 监听歌曲变化，更新取色
-window.addEventListener('songchange', (e) => {
-  const song = e.detail;
-  if (song.cover) extractColors(song.cover);
-});
-
-// 歌词同步更新
+// 歌词同步
 window.addEventListener('timeupdate', (e) => {
   updateLyrics(e.detail);
 });
 
-// 加载聊天历史
-loadChatHistory();
+// 歌曲变化时取色
+window.addEventListener('songchange', (e) => {
+  const song = e.detail;
+  if (song.cover) extractColors(song.cover);
+});
