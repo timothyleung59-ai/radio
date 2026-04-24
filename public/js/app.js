@@ -1,5 +1,6 @@
 // public/js/app.js
 import { restorePlayback } from './player.js';
+import { initVisual, extractColors } from './visual.js';
 
 console.log('Claudio FM 加载中...');
 
@@ -11,5 +12,14 @@ window.showToast = function(msg, duration = 2000) {
   setTimeout(() => toast.classList.remove('show'), duration);
 };
 
+// 初始化视觉系统
+initVisual();
+
 // 恢复上次播放状态
 restorePlayback();
+
+// 监听歌曲变化，更新取色
+window.addEventListener('songchange', (e) => {
+  const song = e.detail;
+  if (song.cover) extractColors(song.cover);
+});
