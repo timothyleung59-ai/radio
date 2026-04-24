@@ -1,0 +1,87 @@
+// public/js/api.js
+const NETEASE_API = 'http://192.168.5.103:3000';
+
+export const netease = {
+  async search(keywords, limit = 20) {
+    const res = await fetch(`${NETEASE_API}/cloudsearch?keywords=${encodeURIComponent(keywords)}&type=1&limit=${limit}`);
+    const data = await res.json();
+    if (!data.result?.songs) return [];
+    return data.result.songs.map(s => ({
+      id: s.id.toString(),
+      name: s.name,
+      artist: s.ar.map(a => a.name).join('/'),
+      album: s.al.name,
+      cover: s.al.picUrl,
+      duration: Math.floor(s.dt / 1000)
+    }));
+  },
+
+  async getSongUrl(id) {
+    const res = await fetch(`${NETEASE_API}/song/url?id=${id}&br=320000`);
+    const data = await res.json();
+    return data.data?.[0]?.url || null;
+  },
+
+  async getLyrics(id) {
+    const res = await fetch(`${NETEASE_API}/lyric?id=${id}`);
+    const data = await res.json();
+    return {
+      lrc: data.lrc?.lyric || '',
+      tlyric: data.tlyric?.lyric || ''
+    };
+  },
+
+  async getPersonalized(limit = 10) {
+    const res = await fetch(`${NETEASE_API}/personalized?limit=${limit}`);
+    const data = await res.json();
+    return data.result || [];
+  },
+
+  async getPlaylistDetail(id) {
+    const res = await fetch(`${NETEASE_API}/playlist/detail?id=${id}`);
+    const data = await res.json();
+    const pl = data.playlist;
+    if (!pl) return null;
+    return {
+      id: pl.id,
+      name: pl.name,
+      cover: pl.coverImgUrl,
+      songs: pl.tracks.map(s => ({
+        id: s.id.toString(),
+        name: s.name,
+        artist: s.ar.map(a => a.name).join('/'),
+        album: s.al.name,
+        cover: s.al.picUrl,
+        duration: Math.floor(s.dt / 1000)
+      }))
+    };
+  }
+};
+
+// Server API wrapper
+export const server = {
+  async get(url) {
+    const res = await fetch(url);
+    return res.json();
+  },
+  async post(url, body) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    return res.json();
+  },
+  async put(url, body) {
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    return res.json();
+  },
+  async del(url) {
+    const res = await fetch(url, { method: 'DELETE' });
+    return res.json();
+  }
+};

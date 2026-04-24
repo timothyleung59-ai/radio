@@ -215,6 +215,26 @@ app.get('/api/chat/history', (req, res) => {
   res.json(rows.reverse());
 });
 
+// ========== 配置 API ==========
+const configDir = path.join(__dirname, 'config');
+
+app.get('/api/config', (req, res) => {
+  const files = ['agent.md', 'taste.md', 'routines.md', 'moodrules.md'];
+  const config = {};
+  for (const f of files) {
+    const fp = path.join(configDir, f);
+    config[f.replace('.md', '')] = fs.existsSync(fp) ? fs.readFileSync(fp, 'utf-8') : '';
+  }
+  res.json(config);
+});
+
+app.post('/api/config/:filename', (req, res) => {
+  const allowed = ['agent.md', 'taste.md', 'routines.md', 'moodrules.md'];
+  if (!allowed.includes(req.params.filename)) return res.status(400).json({ error: '不允许的文件' });
+  fs.writeFileSync(path.join(configDir, req.params.filename), req.body.content || '');
+  res.json({ ok: true });
+});
+
 app.listen(PORT, () => {
   console.log(`Claudio FM 服务已启动: http://localhost:${PORT}`);
 });
