@@ -1,0 +1,9 @@
+/* public/css/lyrics.css */
+.lyrics-content {
+  color: var(--text-secondary);
+  font-size: 15px;
+  line-height: 2;
+}
+.lyrics-line { transition: color 0.3s, font-size 0.3s; }
+.lyrics-line.active { color: var(--text-primary); font-size: 17px; font-weight: 500; }
+.lyrics-line.past { color: var(--text-muted); }

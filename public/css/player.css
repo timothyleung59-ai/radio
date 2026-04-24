@@ -1,0 +1,163 @@
+/* public/css/player.css */
+.player-section {
+  flex-shrink: 0;
+  padding: 0 20px;
+}
+
+/* 封面容器（3D 翻转） */
+.cover-container {
+  width: 100%;
+  aspect-ratio: 1;
+  perspective: 1000px;
+  cursor: pointer;
+  margin-bottom: 20px;
+}
+
+.cover-flipper {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  transform-style: preserve-3d;
+  transition: transform 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.cover-flipper.flipped {
+  transform: rotateY(180deg);
+}
+
+.cover-front, .cover-back {
+  position: absolute;
+  inset: 0;
+  backface-visibility: hidden;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.cover-front {
+  background: var(--bg-card);
+  box-shadow:
+    0 20px 60px -15px rgba(0,0,0,0.5),
+    0 0 0 1px var(--border-subtle);
+}
+
+.cover-front img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.cover-back {
+  transform: rotateY(180deg);
+  background: var(--bg-card);
+  padding: 20px;
+  overflow-y: auto;
+}
+
+/* 律动光效 */
+.cover-glow {
+  position: absolute;
+  inset: -4px;
+  border-radius: calc(var(--radius-lg) + 4px);
+  opacity: 0;
+  transition: opacity 0.3s;
+  pointer-events: none;
+  z-index: -1;
+}
+.cover-glow.active {
+  opacity: 1;
+  box-shadow: 0 0 30px 8px var(--color-primary);
+}
+
+/* 播放控制区 */
+.player-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.player-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.song-title {
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.2;
+  flex: 1;
+  margin-right: 12px;
+}
+
+.like-btn {
+  width: 36px; height: 36px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 20px;
+  transition: color 0.15s, transform 0.15s;
+}
+.like-btn:hover { transform: scale(1.1); }
+.like-btn.liked { color: #e74c3c; }
+
+.progress-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.progress-time {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 36px;
+}
+
+.progress-track {
+  flex: 1;
+  height: 4px;
+  background: rgba(255,255,255,0.15);
+  border-radius: 999px;
+  cursor: pointer;
+  position: relative;
+}
+
+.progress-fill {
+  height: 100%;
+  background: var(--text-primary);
+  border-radius: 999px;
+  width: 0%;
+  transition: width 0.1s linear;
+}
+
+.control-buttons {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 24px;
+}
+
+.ctrl-btn {
+  width: 40px; height: 40px;
+  border: none;
+  background: none;
+  color: var(--text-primary);
+  cursor: pointer;
+  border-radius: 50%;
+  display: grid; place-items: center;
+  font-size: 18px;
+  transition: background 0.15s, transform 0.1s;
+}
+.ctrl-btn:hover { background: rgba(255,255,255,0.1); }
+.ctrl-btn:active { transform: scale(0.92); }
+.ctrl-btn.active { color: var(--color-accent); }
+
+.play-btn {
+  width: 52px; height: 52px;
+  background: var(--text-primary);
+  color: var(--bg-base);
+  font-size: 22px;
+}
+.play-btn:hover { background: var(--text-primary); transform: scale(1.04); }
