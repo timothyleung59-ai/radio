@@ -5,6 +5,7 @@ const cors = require('cors');
 const fs = require('fs');
 const Database = require('better-sqlite3');
 const Anthropic = require('@anthropic-ai/sdk');
+const cron = require('node-cron');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -380,6 +381,116 @@ app.post('/api/dispatch', async (req, res) => {
     console.error('Claude API 错误:', err);
     res.status(500).json({ type: 'error', message: err.message });
   }
+});
+
+// ========== 定时任务 ==========
+let schedulerStatus = {
+  dailyPlaylist: { lastRun: null, status: 'idle' },
+  moodCheck: { lastRun: null, status: 'idle' }
+};
+
+// 每日歌单推荐（每天 07:00）
+cron.schedule('0 7 * * *', async () => {
+  console.log('执行每日歌单推荐...');
+  schedulerStatus.dailyPlaylist.status = 'running';
+  try {
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const history = db.prepare('SELECT * FROM play_history ORDER BY played_at DESC LIMIT 50').all();
+
+    const prompt = `根据以下信息，推荐今日歌单（10首歌），返回 JSON 格式：
+[{"id": "网易云歌曲ID", "name": "歌名", "artist": "艺术家", "album": "专辑", "cover": "封面URL"}]
+
+${configCache.taste ? '品味偏好：' + configCache.taste : ''}
+最近听歌记录：${history.map(h => h.song_name + ' - ' + h.artist).join(', ')}`;
+
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1024,
+      messages: [{ role: 'user', content: prompt }]
+    });
+
+    const content = response.content[0].text;
+    let songs = [];
+    try { songs = JSON.parse(content); } catch(e) {}
+
+    if (songs.length > 0) {
+      // 创建每日歌单
+      const result = db.prepare('INSERT INTO playlists (name, type) VALUES (?, ?)').run('今日推荐', 'daily');
+      const playlistId = result.lastInsertRowid;
+      const stmt = db.prepare('INSERT INTO playlist_songs (playlist_id, song_id, song_name, artist, album, cover_url, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)');
+      songs.forEach((s, i) => {
+        stmt.run(playlistId, s.id, s.name, s.artist, s.album || '', s.cover || '', i);
+      });
+    }
+
+    schedulerStatus.dailyPlaylist.lastRun = new Date().toISOString();
+    schedulerStatus.dailyPlaylist.status = 'idle';
+    console.log('每日歌单推荐完成');
+  } catch (err) {
+    console.error('每日歌单推荐失败:', err);
+    schedulerStatus.dailyPlaylist.status = 'error';
+  }
+});
+
+// 每小时情绪检查
+cron.schedule('0 * * * *', async () => {
+  console.log('执行情绪检查...');
+  schedulerStatus.moodCheck.status = 'running';
+  try {
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const hour = new Date().getHours();
+    const recentChats = db.prepare('SELECT * FROM chat_messages ORDER BY id DESC LIMIT 10').all();
+
+    const prompt = `当前时间：${hour}:00
+${configCache.moodrules ? '情绪规则：' + configCache.moodrules : ''}
+最近聊天：${recentChats.map(c => c.content).join('\n')}
+
+判断当前电台情绪，返回 JSON：
+{"mood": "情绪标签", "genre": "推荐曲风", "message": "一句话描述"}`;
+
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 256,
+      messages: [{ role: 'user', content: prompt }]
+    });
+
+    const content = response.content[0].text;
+    let moodData = {};
+    try { moodData = JSON.parse(content); } catch(e) {}
+
+    if (moodData.mood) {
+      db.prepare('INSERT OR REPLACE INTO preferences (key, value) VALUES (?, ?)').run('current_mood', JSON.stringify(moodData));
+    }
+
+    schedulerStatus.moodCheck.lastRun = new Date().toISOString();
+    schedulerStatus.moodCheck.status = 'idle';
+    console.log('情绪检查完成:', moodData.mood);
+  } catch (err) {
+    console.error('情绪检查失败:', err);
+    schedulerStatus.moodCheck.status = 'error';
+  }
+});
+
+// ========== 定时任务 API ==========
+app.get('/api/scheduler/status', (req, res) => {
+  res.json(schedulerStatus);
+});
+
+app.get('/api/scheduler/daily-playlist', (req, res) => {
+  const playlist = db.prepare("SELECT * FROM playlists WHERE type = 'daily' ORDER BY created_at DESC LIMIT 1").get();
+  if (!playlist) return res.json(null);
+  const songs = db.prepare('SELECT * FROM playlist_songs WHERE playlist_id = ? ORDER BY sort_order').all(playlist.id);
+  res.json({ ...playlist, songs });
+});
+
+app.get('/api/scheduler/mood', (req, res) => {
+  const mood = db.prepare("SELECT value FROM preferences WHERE key = 'current_mood'").get();
+  res.json(mood ? JSON.parse(mood.value) : null);
+});
+
+app.post('/api/scheduler/trigger/:task', async (req, res) => {
+  // 手动触发（调试用）
+  res.json({ ok: true, message: `任务 ${req.params.task} 已触发` });
 });
 
 app.listen(PORT, () => {
