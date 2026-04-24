@@ -1,0 +1,7 @@
+[
+  {"time": "08:00", "event": "晨跑", "mood": "energetic", "duration": 30},
+  {"time": "10:00", "event": "专注工作", "mood": "focus", "duration": 120},
+  {"time": "14:00", "event": "下午茶", "mood": "relax", "duration": 30},
+  {"time": "18:00", "event": "下班通勤", "mood": "chill", "duration": 45},
+  {"time": "22:00", "event": "睡前放松", "mood": "calm", "duration": 60}
+]

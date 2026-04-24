@@ -237,6 +237,19 @@ app.post('/api/config/:filename', (req, res) => {
   res.json({ ok: true });
 });
 
+// ========== Mock 日历 API ==========
+app.get('/api/schedule', (req, res) => {
+  const fp = path.join(configDir, 'schedule.json');
+  if (!fs.existsSync(fp)) return res.json([]);
+  res.json(JSON.parse(fs.readFileSync(fp, 'utf-8')));
+});
+
+app.post('/api/schedule', (req, res) => {
+  const fp = path.join(configDir, 'schedule.json');
+  fs.writeFileSync(fp, JSON.stringify(req.body, null, 2));
+  res.json({ ok: true });
+});
+
 // ========== 配置文件热加载 ==========
 let configCache = {};
 

@@ -218,6 +218,22 @@ audio.addEventListener('error', () => {
   playNext();
 });
 
+// DJ 语音音频闪避
+window.addEventListener('voiceStart', () => {
+  audio.volume = 0.2;
+});
+
+window.addEventListener('voiceEnd', () => {
+  // 渐变恢复音量
+  const target = parseFloat(document.querySelector('#volumeSlider')?.value || 0.8);
+  let current = 0.2;
+  const fade = setInterval(() => {
+    current = Math.min(current + 0.05, target);
+    audio.volume = current;
+    if (current >= target) clearInterval(fade);
+  }, 50);
+});
+
 // 恢复播放状态
 export async function restorePlayback() {
   const state = await server.get('/api/playback-state');
