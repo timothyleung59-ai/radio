@@ -90,6 +90,50 @@
     </div>
   </div>
 
+  <!-- DJ 信息面板 -->
+  <div class="panel-overlay" id="djPanel" style="display:none">
+    <div class="panel-content">
+      <div class="panel-header">
+        <h3>Claudio FM</h3>
+        <button class="panel-close" onclick="document.getElementById('djPanel').style.display='none'">✕</button>
+      </div>
+      <div class="panel-body">
+        <div class="panel-section">
+          <h4>电台简介</h4>
+          <p id="stationInfo" style="color:var(--text-secondary);font-size:14px;line-height:1.6">
+            Claudio 的个人 AI 电台，品味独到，只播好歌。
+          </p>
+        </div>
+        <div class="panel-section">
+          <h4>你的音乐品味画像</h4>
+          <div id="tasteProfile" style="color:var(--text-secondary);font-size:14px;line-height:1.6">
+            加载中...
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 用户信息面板 -->
+  <div class="panel-overlay" id="userPanel" style="display:none">
+    <div class="panel-content">
+      <div class="panel-header">
+        <h3>我的音乐</h3>
+        <button class="panel-close" onclick="document.getElementById('userPanel').style.display='none'">✕</button>
+      </div>
+      <div class="panel-body">
+        <div class="panel-section">
+          <h4>喜欢的歌曲</h4>
+          <div id="favoritesList" style="font-size:14px">加载中...</div>
+        </div>
+        <div class="panel-section">
+          <h4>最近播放</h4>
+          <div id="historyList" style="font-size:14px">加载中...</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="toast" id="toast"></div>
 
   <script type="module" src="js/app.js"></script>

@@ -3,6 +3,7 @@ import { restorePlayback } from './player.js';
 import { initVisual, extractColors } from './visual.js';
 import { updateLyrics } from './lyrics.js';
 import { loadChatHistory } from './chat.js';
+import './panels.js';
 
 console.log('Claudio FM 加载中...');
 

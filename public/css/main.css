@@ -157,3 +157,69 @@ html, body {
   pointer-events: none;
 }
 .toast.show { opacity: 1; }
+
+/* 弹出面板 */
+.panel-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  z-index: 1000;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.panel-content {
+  width: 100%;
+  max-width: 440px;
+  max-height: 70vh;
+  background: var(--bg-card);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  overflow-y: auto;
+  animation: slideUp 0.3s ease;
+}
+
+@keyframes slideUp {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-subtle);
+  position: sticky;
+  top: 0;
+  background: var(--bg-card);
+}
+
+.panel-header h3 { font-size: 16px; }
+
+.panel-close {
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255,255,255,0.1);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.panel-body { padding: 16px 20px; }
+
+.panel-section { margin-bottom: 20px; }
+.panel-section h4 { font-size: 13px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px; }
+
+.panel-song {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.panel-song:last-child { border-bottom: none; }
+.panel-song-cover { width: 36px; height: 36px; border-radius: 4px; object-fit: cover; }
+.panel-song-name { font-size: 13px; font-weight: 500; }
+.panel-song-artist { font-size: 11px; color: var(--text-muted); }
