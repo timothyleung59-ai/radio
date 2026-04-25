@@ -155,6 +155,35 @@
     <div class="voice-text" id="voiceText"></div>
   </div>
 
+  <!-- 电台配置面板 -->
+  <div class="panel-overlay" id="configPanel" style="display:none">
+    <div class="panel-content">
+      <div class="panel-header">
+        <h3>电台配置</h3>
+        <button class="panel-close" onclick="document.getElementById('configPanel').style.display='none'">✕</button>
+      </div>
+      <div class="panel-body">
+        <div class="config-group">
+          <label class="config-label">Claude API Base URL</label>
+          <input class="config-input" id="cfgBaseUrl" placeholder="https://...">
+        </div>
+        <div class="config-group">
+          <label class="config-label">Claude API Key</label>
+          <input class="config-input" id="cfgApiKey" type="password" placeholder="留空表示不修改">
+        </div>
+        <div class="config-group">
+          <label class="config-label">网易云 API 地址</label>
+          <input class="config-input" id="cfgNeteaseApi" placeholder="http://ip:port">
+        </div>
+        <div class="config-group">
+          <label class="config-label">网易云 MUSIC_U Cookie</label>
+          <input class="config-input" id="cfgNeteaseCookie" type="password" placeholder="留空表示不修改">
+        </div>
+        <button class="config-save-btn" id="cfgSaveBtn">保存并重启</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 播放列表面板 -->
   <div class="panel-overlay" id="queuePanel" style="display:none">
     <div class="panel-content">

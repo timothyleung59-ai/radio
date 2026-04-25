@@ -68,9 +68,41 @@ topbarMenu?.querySelectorAll('.topbar-menu-item').forEach(btn => {
     }
 
     if (action === 'config') {
-      window.showToast('配置面板开发中');
+      const panel = document.getElementById('configPanel');
+      panel.style.display = 'flex';
+      try {
+        const cfg = await server.get('/api/env-config');
+        document.getElementById('cfgBaseUrl').value = cfg.ANTHROPIC_BASE_URL || '';
+        document.getElementById('cfgApiKey').value = cfg.ANTHROPIC_API_KEY || '';
+        document.getElementById('cfgNeteaseApi').value = cfg.NETEASE_API || '';
+        document.getElementById('cfgNeteaseCookie').value = cfg.NETEASE_COOKIE || '';
+      } catch { window.showToast('加载配置失败'); }
     }
   });
+});
+
+// 配置面板保存
+document.getElementById('cfgSaveBtn')?.addEventListener('click', async () => {
+  const btn = document.getElementById('cfgSaveBtn');
+  btn.disabled = true;
+  btn.textContent = '保存中...';
+  try {
+    await server.put('/api/env-config', {
+      ANTHROPIC_BASE_URL: document.getElementById('cfgBaseUrl').value.trim(),
+      ANTHROPIC_API_KEY: document.getElementById('cfgApiKey').value.trim() || undefined,
+      NETEASE_API: document.getElementById('cfgNeteaseApi').value.trim(),
+      NETEASE_COOKIE: document.getElementById('cfgNeteaseCookie').value.trim() || undefined
+    });
+    window.showToast('配置已保存，重启服务后生效');
+    document.getElementById('configPanel').style.display = 'none';
+  } catch { window.showToast('保存失败'); }
+  btn.disabled = false;
+  btn.textContent = '保存并重启';
+});
+
+// 点击遮罩关闭配置面板
+document.getElementById('configPanel')?.addEventListener('click', (e) => {
+  if (e.target.id === 'configPanel') e.target.style.display = 'none';
 });
 
 // 初始化

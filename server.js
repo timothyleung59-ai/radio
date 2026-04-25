@@ -237,6 +237,41 @@ app.post('/api/config/:filename', (req, res) => {
   res.json({ ok: true });
 });
 
+// ========== 环境变量配置 API ==========
+const envPath = path.join(__dirname, '.env');
+const MASK = '***已设置***';
+
+app.get('/api/env-config', (req, res) => {
+  res.json({
+    ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL || '',
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ? MASK : '',
+    NETEASE_API: process.env.NETEASE_API || '',
+    NETEASE_COOKIE: process.env.NETEASE_COOKIE ? MASK : ''
+  });
+});
+
+app.put('/api/env-config', (req, res) => {
+  const { ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, NETEASE_API, NETEASE_COOKIE } = req.body;
+
+  let envContent = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf-8') : '';
+
+  const updates = { ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, NETEASE_API, NETEASE_COOKIE };
+  for (const [key, val] of Object.entries(updates)) {
+    if (val === undefined || val === MASK) continue; // 跳过未修改的敏感字段
+    process.env[key] = val;
+    const regex = new RegExp(`^${key}=.*$`, 'm');
+    const line = `${key}=${val}`;
+    if (regex.test(envContent)) {
+      envContent = envContent.replace(regex, line);
+    } else {
+      envContent += (envContent.endsWith('\n') ? '' : '\n') + line + '\n';
+    }
+  }
+
+  fs.writeFileSync(envPath, envContent);
+  res.json({ ok: true });
+});
+
 // ========== 网易云 API 代理（避免浏览器 CORS） ==========
 const NETEASE_API = process.env.NETEASE_API || 'http://192.168.5.103:3000';
 const NETEASE_COOKIE = process.env.NETEASE_COOKIE || '';
