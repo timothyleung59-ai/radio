@@ -143,6 +143,7 @@ async function checkLiked() {
   isLiked = favs.some(f => f.song_id === currentSong.id);
   likeBtn.textContent = isLiked ? '♥' : '♡';
   likeBtn.classList.toggle('liked', isLiked);
+  if (miniLikeBtn) miniLikeBtn.textContent = isLiked ? '♥' : '♡';
 }
 
 export async function playSong(song) {
@@ -354,6 +355,7 @@ const miniPlayer = $('miniPlayer');
 const playerCollapse = $('playerCollapse');
 const miniPlayBtn = $('miniPlayBtn');
 const miniNextBtn = $('miniNextBtn');
+const miniLikeBtn = $('miniLikeBtn');
 const miniCover = $('miniCover');
 const miniTitle = $('miniTitle');
 const miniProgressFill = $('miniProgressFill');
@@ -382,6 +384,11 @@ miniPlayBtn?.addEventListener('click', (e) => {
 miniNextBtn?.addEventListener('click', (e) => {
   e.stopPropagation();
   playNext();
+});
+
+miniLikeBtn?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  toggleLike();
 });
 
 // 同步迷你播放器状态
