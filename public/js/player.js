@@ -367,6 +367,7 @@ function setPlayerCollapsed(collapsed) {
   playerSection.classList.toggle('collapsed', collapsed);
   miniPlayer.classList.toggle('show', collapsed);
   playerToggle?.classList.toggle('flipped', !collapsed);
+  if (playerToggle) playerToggle.title = collapsed ? '展开播放器' : '收起播放器';
 }
 
 playerToggle?.addEventListener('click', () => setPlayerCollapsed(!playerCollapsed));
