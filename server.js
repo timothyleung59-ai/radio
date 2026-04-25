@@ -378,8 +378,19 @@ function buildSystemPrompt(currentSong, chatHistory) {
   "say": "你对用户说的话",
   "reason": "推荐理由（如果是推荐歌曲）",
   "play": [{"id": "网易云歌曲ID", "name": "歌曲名", "artist": "艺术家", "album": "专辑", "cover": "封面URL"}],
-  "segue": "你想用语音说的内容（歌曲赏析、故事等，可以为空）"
+  "segue": "你想用语音说的内容（歌曲赏析、故事等，可以为空）",
+  "memory": [{"file": "taste|routines|moodrules", "add": "要追加的一句话"}]
 }
+
+## memory 字段规则
+- 当你从对话中发现用户的**新偏好、新习惯、新情绪模式**，且这些信息在上方 system prompt 中**没有出现过**，才放入 memory
+- 已有的习惯和偏好不要重复写入，只写新的
+- file 取值：
+  - "taste"：音乐偏好（喜欢的曲风、歌手、歌曲）
+  - "routines"：作息习惯（起床时间、工作时段、睡前习惯）
+  - "moodrules"：情绪与场景规则（什么心情听什么、特定场景、特定时间段的音乐需求）
+- 如果没有新发现，memory 返回空数组 []
+- memory 不是每条必返，只有确实有新信息时才返回
 只返回 JSON，不要包裹在 markdown 代码块中。`);
 
   return parts.join('\n\n');
@@ -462,7 +473,21 @@ app.post('/api/dispatch', async (req, res) => {
         parsed = JSON.parse(fullContent);
       } catch(e) {
         // 非 JSON 回复，当作纯文本
-        parsed = { say: fullContent, reason: '', play: [], segue: '' };
+        parsed = { say: fullContent, reason: '', play: [], segue: '', memory: [] };
+      }
+
+      // 处理 memory 写入
+      if (Array.isArray(parsed.memory) && parsed.memory.length > 0) {
+        console.log(`[memory] AI 返回记忆:`, JSON.stringify(parsed.memory));
+        const allowed = { taste: 'taste.md', routines: 'routines.md', moodrules: 'moodrules.md' };
+        for (const m of parsed.memory) {
+          if (m.file && m.add && allowed[m.file]) {
+            const fp = path.join(__dirname, 'config', allowed[m.file]);
+            fs.appendFileSync(fp, `\n- ${m.add.trim()}`, 'utf-8');
+            console.log(`[memory] 写入 ${allowed[m.file]}: ${m.add.trim()}`);
+          }
+        }
+        loadConfigFiles();
       }
 
       // 提取歌曲卡片
