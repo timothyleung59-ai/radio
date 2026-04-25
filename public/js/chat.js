@@ -57,6 +57,9 @@ async function sendMessage() {
   // 显示用户消息
   addMessage('user', text);
 
+  // 显示思考中动画
+  const typingMsg = addMessage('assistant', '<div class="typing-indicator"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>');
+
   // 获取当前歌曲信息
   const currentSong = window.player?.getCurrentSong?.() || null;
 
@@ -92,6 +95,7 @@ async function sendMessage() {
           if (data.type === 'text') {
             fullText += data.text;
             if (!assistantMsg) {
+              typingMsg?.remove();
               assistantMsg = addMessage('assistant', '');
             }
             assistantMsg.querySelector('.msg-bubble').textContent = fullText;
@@ -143,6 +147,7 @@ async function sendMessage() {
       }
     } else {
       // 非流式响应（简单指令/搜索）
+      typingMsg?.remove();
       const data = await res.json();
       if (data.type === 'command') {
         handleCommand(data);
@@ -151,6 +156,7 @@ async function sendMessage() {
       }
     }
   } catch (err) {
+    typingMsg?.remove();
     addMessage('assistant', `发送失败: ${err.message}`);
   }
 
