@@ -1,11 +1,52 @@
 // public/js/panels.js — 头像弹出面板逻辑
 import { server } from './api.js';
 
+function favToSong(s) {
+  return { id: s.song_id, name: s.song_name, artist: s.artist, album: s.album || '', cover: s.cover_url || '' };
+}
+
+async function loadFavorites() {
+  try {
+    const favs = await server.get('/api/favorites');
+    document.getElementById('favoritesList').innerHTML = favs.length === 0
+      ? '<p style="color:var(--text-muted)">还没有收藏歌曲</p>'
+      : favs.map(s => `
+        <div class="panel-song">
+          <img class="panel-song-cover" src="${s.cover_url || ''}" alt="" onerror="this.style.display='none'">
+          <div class="panel-song-info">
+            <div class="panel-song-name">${s.song_name}</div>
+            <div class="panel-song-artist">${s.artist}</div>
+          </div>
+          <button class="panel-song-play" data-song='${JSON.stringify(favToSong(s))}' title="播放">▶</button>
+          <button class="panel-song-add" data-song='${JSON.stringify(favToSong(s))}' title="加入队列">+</button>
+        </div>
+      `).join('');
+
+    // 绑定按钮
+    document.querySelectorAll('.panel-song-play').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const song = JSON.parse(btn.dataset.song);
+        window.player?.playSong?.(song);
+        window.player?.addToQueue?.([song]);
+        window.showToast(`正在播放：${song.name}`);
+      });
+    });
+    document.querySelectorAll('.panel-song-add').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const song = JSON.parse(btn.dataset.song);
+        window.player?.addToQueue?.([song]);
+        window.showToast(`已加入队列：${song.name}`);
+      });
+    });
+  } catch (e) {
+    document.getElementById('favoritesList').textContent = '加载失败';
+  }
+}
+
 // DJ 头像 → 电台信息面板
 document.getElementById('djAvatar').addEventListener('click', async () => {
   document.getElementById('djPanel').style.display = 'flex';
 
-  // 加载品味画像
   try {
     const prefs = await server.get('/api/preferences');
     const profile = prefs.taste_profile ? JSON.parse(prefs.taste_profile) : null;
@@ -17,34 +58,18 @@ document.getElementById('djAvatar').addEventListener('click', async () => {
   }
 });
 
-// 用户头像 → 个人面板
-document.getElementById('userAvatar').addEventListener('click', async () => {
+// 用户面板入口（header 按钮 + 消息头像）
+function openUserPanel() {
   document.getElementById('userPanel').style.display = 'flex';
+  loadFavorites();
+}
 
-  // 加载收藏列表
-  try {
-    const favs = await server.get('/api/favorites');
-    document.getElementById('favoritesList').innerHTML = favs.length === 0
-      ? '<p style="color:var(--text-muted)">还没有收藏歌曲</p>'
-      : favs.map(s => `
-        <div class="panel-song">
-          <img class="panel-song-cover" src="${s.cover_url || ''}" alt="" onerror="this.style.display='none'">
-          <div><div class="panel-song-name">${s.song_name}</div><div class="panel-song-artist">${s.artist}</div></div>
-        </div>
-      `).join('');
+document.getElementById('userAvatar').addEventListener('click', openUserPanel);
 
-    const history = await server.get('/api/history?limit=20');
-    document.getElementById('historyList').innerHTML = history.length === 0
-      ? '<p style="color:var(--text-muted)">还没有播放记录</p>'
-      : history.slice(0, 10).map(s => `
-        <div class="panel-song">
-          <img class="panel-song-cover" src="${s.cover_url || ''}" alt="" onerror="this.style.display='none'">
-          <div><div class="panel-song-name">${s.song_name}</div><div class="panel-song-artist">${s.artist}</div></div>
-        </div>
-      `).join('');
-  } catch (e) {
-    document.getElementById('favoritesList').textContent = '加载失败';
-  }
+// 聊天消息中点击用户头像也打开面板
+document.getElementById('chatMessages')?.addEventListener('click', (e) => {
+  const avatar = e.target.closest('.msg.user .msg-avatar');
+  if (avatar) openUserPanel();
 });
 
 // 点击遮罩关闭
