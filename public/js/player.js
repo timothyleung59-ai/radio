@@ -163,6 +163,8 @@ export async function playSong(song) {
 
   updatePlayButton();
   checkLiked();
+  syncMiniPlayer();
+  setPlayerCollapsed(true);
 
   // 记录播放历史
   server.post('/api/history', {
@@ -312,6 +314,7 @@ progressTrack.addEventListener('pointermove', e => {
 
 audio.addEventListener('timeupdate', () => {
   updateProgress();
+  syncMiniProgress();
   window.dispatchEvent(new CustomEvent('timeupdate', { detail: audio.currentTime }));
 });
 audio.addEventListener('ended', () => {
@@ -322,8 +325,8 @@ audio.addEventListener('ended', () => {
     playNext();
   }
 });
-audio.addEventListener('play', updatePlayButton);
-audio.addEventListener('pause', updatePlayButton);
+audio.addEventListener('play', () => { updatePlayButton(); syncMiniPlayer(); });
+audio.addEventListener('pause', () => { updatePlayButton(); syncMiniPlayer(); });
 audio.addEventListener('error', () => {
   window.showToast('播放出错，自动跳到下一首');
   playNext();
@@ -344,6 +347,52 @@ window.addEventListener('voiceEnd', () => {
     if (current >= target) clearInterval(fade);
   }, 50);
 });
+
+// ========== 播放器展开/收起 ==========
+const playerSection = $('playerSection');
+const miniPlayer = $('miniPlayer');
+const playerCollapse = $('playerCollapse');
+const miniPlayBtn = $('miniPlayBtn');
+const miniNextBtn = $('miniNextBtn');
+const miniCover = $('miniCover');
+const miniTitle = $('miniTitle');
+const miniProgressFill = $('miniProgressFill');
+
+let playerCollapsed = false;
+
+function setPlayerCollapsed(collapsed) {
+  playerCollapsed = collapsed;
+  playerSection.classList.toggle('collapsed', collapsed);
+  miniPlayer.classList.toggle('show', collapsed);
+}
+
+playerCollapse?.addEventListener('click', () => setPlayerCollapsed(true));
+miniPlayer?.addEventListener('click', (e) => {
+  if (e.target.closest('.mini-ctrl')) return;
+  setPlayerCollapsed(false);
+});
+
+miniPlayBtn?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  togglePlay();
+});
+miniNextBtn?.addEventListener('click', (e) => {
+  e.stopPropagation();
+  playNext();
+});
+
+// 同步迷你播放器状态
+function syncMiniPlayer() {
+  if (!currentSong) return;
+  miniCover.src = currentSong.cover || miniCover.src;
+  miniTitle.textContent = `${currentSong.name} — ${currentSong.artist}`;
+  miniPlayBtn.textContent = audio.paused ? '▶' : '⏸';
+}
+
+function syncMiniProgress() {
+  const dur = audio.duration || 0;
+  miniProgressFill.style.width = dur ? `${(audio.currentTime / dur) * 100}%` : '0%';
+}
 
 // 恢复播放状态
 export async function restorePlayback() {
