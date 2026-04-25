@@ -3,6 +3,7 @@
   --color-primary: #4a6cf7;
   --color-secondary: #9b59b6;
   --color-accent: #e74c3c;
+  --blob-secondary: #d9a044;
   --bg-base: #0a0a10;
   --bg-card: #16161a;
   --text-primary: #ffffff;
@@ -39,6 +40,7 @@ html, body {
   display: flex;
   flex-direction: column;
   position: relative;
+  z-index: 2;
   max-width: 440px;
   margin: 0 auto;
 }
@@ -47,7 +49,7 @@ html, body {
 .fluid-bg {
   position: fixed;
   inset: 0;
-  z-index: -1;
+  z-index: 0;
   overflow: hidden;
   pointer-events: none;
 }
@@ -55,59 +57,33 @@ html, body {
 .fluid-blob {
   position: absolute;
   border-radius: 50%;
-  filter: blur(120px) saturate(1.1);
-  opacity: 0.6;
+  filter: blur(40px) saturate(1.5);
+  opacity: 0.75;
   mix-blend-mode: screen;
   will-change: transform;
 }
 
 .fluid-blob.primary {
-  width: 60vmin; height: 60vmin;
-  left: 50%; top: 50%;
-  margin-left: -30vmin; margin-top: -30vmin;
-  background: radial-gradient(circle, var(--color-primary) 0%, transparent 70%);
-  animation: flow-a 26s ease-in-out infinite;
+  width: 48vmin; height: 48vmin;
+  left: 50%; top: 25%;
+  margin-left: -44vmin; margin-top: -24vmin;
+  background: radial-gradient(circle, var(--color-primary) 0%, var(--color-primary) 40%, transparent 70%);
+  transition: opacity 0.1s;
 }
 
 .fluid-blob.secondary {
-  width: 55vmin; height: 55vmin;
-  left: 50%; top: 50%;
-  margin-left: -27.5vmin; margin-top: -27.5vmin;
-  background: radial-gradient(circle, var(--color-secondary) 0%, transparent 70%);
-  animation: flow-b 34s ease-in-out infinite;
-}
-
-.fluid-blob.accent {
-  width: 35vmin; height: 35vmin;
-  left: 50%; top: 50%;
-  margin-left: -17.5vmin; margin-top: -17.5vmin;
-  opacity: 0.4;
-  background: radial-gradient(circle, var(--color-accent) 0%, transparent 70%);
-  animation: flow-c 42s ease-in-out infinite;
-}
-
-@keyframes flow-a {
-  0%   { transform: translate(-20vmin, -12vmin) scale(1); }
-  50%  { transform: translate(18vmin, 16vmin) scale(1.1); }
-  100% { transform: translate(-20vmin, -12vmin) scale(1); }
-}
-@keyframes flow-b {
-  0%   { transform: translate(16vmin, 14vmin) scale(1.05); }
-  50%  { transform: translate(-22vmin, -10vmin) scale(0.95); }
-  100% { transform: translate(16vmin, 14vmin) scale(1.05); }
-}
-@keyframes flow-c {
-  0%   { transform: translate(0, 0) scale(1); }
-  33%  { transform: translate(-15vmin, 8vmin) scale(1.15); }
-  66%  { transform: translate(12vmin, -6vmin) scale(0.9); }
-  100% { transform: translate(0, 0) scale(1); }
+  width: 38vmin; height: 38vmin;
+  left: 50%; top: 25%;
+  margin-left: -6vmin; margin-top: 2vmin;
+  background: radial-gradient(circle, var(--blob-secondary) 0%, var(--blob-secondary) 40%, transparent 70%);
+  transition: opacity 0.1s;
 }
 
 /* 噪点纹理 */
 .noise-overlay {
   position: fixed;
   inset: 0;
-  z-index: -1;
+  z-index: 1;
   opacity: 0.04;
   pointer-events: none;
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)' opacity='0.5'/></svg>");

@@ -59,6 +59,9 @@ export function extractColors(imageUrl) {
       document.documentElement.style.setProperty('--color-secondary', secondary);
       document.documentElement.style.setProperty('--color-accent', accent);
 
+      // 右光球用主色的互补色
+      document.documentElement.style.setProperty('--blob-secondary', complementaryColor(primary));
+
       resolve({ primary, secondary, accent });
     };
     img.onerror = () => resolve(null);
@@ -103,6 +106,39 @@ function simpleKMeans(pixels, k) {
   return centroids;
 }
 
+// 互补色：rgb字符串 → 旋转色相180°
+function complementaryColor(rgbStr) {
+  const m = rgbStr.match(/(\d+)/g);
+  if (!m) return rgbStr;
+  let [r, g, b] = m.map(Number);
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return rgbStr; // 灰色无互补
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h;
+  if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+  else if (max === g) h = ((b - r) / d + 2) / 6;
+  else h = ((r - g) / d + 4) / 6;
+  h = (h + 0.5) % 1; // 旋转180°
+  const s2 = Math.min(s, 0.7); // 降饱和，防刺眼
+  const l2 = Math.min(l + 0.08, 0.6); // 稍提亮
+  const hue2rgb = (p, q, t) => {
+    if (t < 0) t += 1; if (t > 1) t -= 1;
+    if (t < 1/6) return p + (q - p) * 6 * t;
+    if (t < 1/2) return q;
+    if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+    return p;
+  };
+  const q2 = l2 < 0.5 ? l2 * (1 + s2) : l2 + s2 - l2 * s2;
+  const p2 = 2 * l2 - q2;
+  const rr = Math.round(hue2rgb(p2, q2, h + 1/3) * 255);
+  const gg = Math.round(hue2rgb(p2, q2, h) * 255);
+  const bb = Math.round(hue2rgb(p2, q2, h - 1/3) * 255);
+  return `rgb(${rr},${gg},${bb})`;
+}
+
 // ========== 封面翻转 ==========
 export function initCoverFlip() {
   const container = $('coverContainer');
@@ -116,21 +152,173 @@ export function initCoverFlip() {
   });
 }
 
-// ========== 律动光效（简化版，无 Web Audio 时用定时脉动） ==========
-export function initBeatGlow() {
+// ========== Web Audio 音频可视化（光球律动） ==========
+export function initAudioVisualizer(audioElement) {
+  const blobs = [
+    document.querySelector('.fluid-blob.primary'),
+    document.querySelector('.fluid-blob.secondary')
+  ];
   const glow = $('coverGlow');
-  let active = false;
-  let interval = null;
+
+  // ---- 频谱 canvas ----
+  const specCanvas = document.createElement('canvas');
+  specCanvas.className = 'spectrum-canvas';
+  specCanvas.style.cssText = 'position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:440px;max-width:100%;height:80px;z-index:1;pointer-events:none;';
+  document.body.appendChild(specCanvas);
+  const specCtx = specCanvas.getContext('2d');
+  const BAR_COUNT = 64;
+  let specBars = new Float32Array(BAR_COUNT); // 平滑后的频谱高度
+
+  function resizeSpec() {
+    const dpr = window.devicePixelRatio || 1;
+    const cw = Math.min(window.innerWidth, 440);
+    specCanvas.width = cw * dpr;
+    specCanvas.height = 80 * dpr;
+    specCtx.scale(dpr, dpr);
+  }
+  resizeSpec();
+  window.addEventListener('resize', resizeSpec);
+
+  let audioCtx = null;
+  let analyser = null;
+  let source = null;
+  let freqData = null;
+  let isPlaying = false;
+
+  let bass = 0, mid = 0;
+
+  function setupAudio() {
+    if (audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.8;
+    source = audioCtx.createMediaElementSource(audioElement);
+    source.connect(analyser);
+    analyser.connect(audioCtx.destination);
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+  }
+
+  function getBandAvg(start, end) {
+    let sum = 0;
+    for (let i = start; i < end; i++) sum += freqData[i];
+    return sum / (end - start) / 255;
+  }
+
+  // 绘制频谱
+  function drawSpectrum(t) {
+    const w = Math.min(window.innerWidth, 440);
+    const h = 80;
+    specCtx.clearRect(0, 0, w, h);
+
+    const barW = w / BAR_COUNT;
+    const gap = 1.5;
+
+    for (let i = 0; i < BAR_COUNT; i++) {
+      const freqIdx = Math.floor(Math.pow(i / BAR_COUNT, 1.6) * (freqData ? freqData.length * 0.8 : 1));
+      const raw = (isPlaying && freqData) ? freqData[freqIdx] / 255 : 0;
+
+      const idle = isPlaying ? 0 : 0.06 + 0.04 * Math.sin(t * 0.002 + i * 0.3);
+
+      const target = Math.max(raw, idle);
+      specBars[i] += (target - specBars[i]) * (target > specBars[i] ? 0.35 : 0.12);
+
+      const barH = specBars[i] * h * 0.9;
+      if (barH < 1) continue;
+
+      const x = i * barW + gap / 2;
+      const bw = barW - gap;
+
+      // 淡灰渐变：底部透明 → 顶部半透明白
+      const grad = specCtx.createLinearGradient(0, h, 0, h - barH);
+      grad.addColorStop(0, 'rgba(255,255,255,0)');
+      grad.addColorStop(0.5, 'rgba(255,255,255,0.08)');
+      grad.addColorStop(1, 'rgba(255,255,255,0.18)');
+
+      specCtx.fillStyle = grad;
+      specCtx.fillRect(x, h - barH, bw, barH);
+    }
+  }
+
+  const ATTACK = 0.4;
+  const RELEASE = 0.15;
+
+  // 主循环 —— 永远不停，idle时也有呼吸漂动
+  function tick() {
+    const t = Date.now();
+
+    // 采音频（仅播放时）
+    if (isPlaying && analyser) {
+      analyser.getByteFrequencyData(freqData);
+      const rawBass = getBandAvg(1, 8);
+      const rawMid = getBandAvg(8, 50);
+      bass += (rawBass - bass) * (rawBass > bass ? ATTACK : RELEASE);
+      mid += (rawMid - mid) * (rawMid > mid ? ATTACK : RELEASE);
+    } else {
+      // 播停了慢慢回落
+      bass *= 0.96;
+      mid *= 0.96;
+    }
+
+    // 基础呼吸漂动（永远存在）
+    const idleDrift = 2;   // idle漂动幅度 vmin
+    const beatDrift = 3;   // 音频加成幅度
+
+    // 左小球 — 低频 + 呼吸
+    if (blobs[0]) {
+      const drift = idleDrift + bass * beatDrift;
+      const bx = Math.sin(t * 0.0003) * drift;
+      const by = Math.cos(t * 0.0004) * drift;
+      const scale = 1 + 0.05 * Math.sin(t * 0.0008) + bass * 0.4;
+      const op = 0.6 + 0.1 * Math.sin(t * 0.0006) + bass * 0.35;
+      blobs[0].style.transform = `translate(${bx}vmin, ${by}vmin) scale(${scale})`;
+      blobs[0].style.opacity = op;
+    }
+
+    // 右大球 — 中频+低频 + 呼吸
+    if (blobs[1]) {
+      const energy = bass * 0.4 + mid * 0.6;
+      const drift = idleDrift + energy * beatDrift;
+      const sx = Math.cos(t * 0.00025) * drift;
+      const sy = Math.sin(t * 0.0003) * drift;
+      const scale = 1 + 0.04 * Math.cos(t * 0.0007) + energy * 0.35;
+      const op = 0.55 + 0.1 * Math.cos(t * 0.0005) + energy * 0.4;
+      blobs[1].style.transform = `translate(${sx}vmin, ${sy}vmin) scale(${scale})`;
+      blobs[1].style.opacity = op;
+    }
+
+    // 封面律动光效
+    if (glow) {
+      const energy = bass * 0.6 + mid * 0.4;
+      const pulse = 0.3 + 0.05 * Math.sin(t * 0.001) + energy * 0.65;
+      glow.style.opacity = pulse;
+      if (isPlaying) {
+        glow.style.boxShadow = `0 0 ${30 + bass * 40}px ${8 + bass * 12}px var(--color-primary)`;
+      }
+    }
+
+    // 底部频谱
+    drawSpectrum(t);
+
+    requestAnimationFrame(tick);
+  }
+
+  // 立即启动，永远跑
+  requestAnimationFrame(tick);
 
   window.addEventListener('songchange', () => {
-    active = true;
-    glow.classList.add('active');
-    // 简化：用定时器模拟脉动
-    if (interval) clearInterval(interval);
-    interval = setInterval(() => {
-      glow.style.opacity = 0.3 + Math.random() * 0.7;
-    }, 500);
+    setupAudio();
+    isPlaying = true;
+    if (glow) glow.classList.add('active');
   });
+
+  audioElement.addEventListener('play', () => {
+    setupAudio();
+    isPlaying = true;
+  });
+
+  audioElement.addEventListener('pause', () => { isPlaying = false; });
+  audioElement.addEventListener('ended', () => { isPlaying = false; });
 }
 
 // ========== 粒子特效 ==========
@@ -189,6 +377,5 @@ export function burstParticles(x, y, color = '#4a6cf7') {
 export function initVisual() {
   initTheme();
   initCoverFlip();
-  initBeatGlow();
   initParticles();
 }

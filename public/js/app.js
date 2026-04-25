@@ -1,6 +1,6 @@
 // public/js/app.js
-import { restorePlayback } from './player.js';
-import { initVisual, extractColors } from './visual.js';
+import { restorePlayback, getAudioElement } from './player.js';
+import { initVisual, initAudioVisualizer, extractColors } from './visual.js';
 import { updateLyrics } from './lyrics.js';
 import { loadChatHistory } from './chat.js';
 import { server } from './api.js';
@@ -8,6 +8,11 @@ import './panels.js';
 import './voice.js';
 
 console.log('Claudio FM 启动中...');
+
+// 注册 Service Worker（PWA）
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
 
 // Toast 工具
 window.showToast = function(msg, duration = 2000) {
@@ -109,6 +114,7 @@ document.getElementById('configPanel')?.addEventListener('click', (e) => {
 async function init() {
   try {
     initVisual();
+    initAudioVisualizer(getAudioElement());
     await restorePlayback();
     await loadChatHistory();
     console.log('Claudio FM 初始化完成');

@@ -597,8 +597,23 @@ app.post('/api/scheduler/trigger/:task', async (req, res) => {
   res.json({ ok: true, message: `任务 ${req.params.task} 已触发` });
 });
 
-app.listen(PORT, () => {
-  console.log(`Claudio FM 服务已启动: http://localhost:${PORT}`);
-});
+const https = require('https');
+
+const certDir = path.join(__dirname, 'certs');
+const hasCerts = fs.existsSync(path.join(certDir, 'cert.pem'));
+
+if (hasCerts) {
+  const server = https.createServer({
+    cert: fs.readFileSync(path.join(certDir, 'cert.pem')),
+    key: fs.readFileSync(path.join(certDir, 'key.pem'))
+  }, app);
+  server.listen(PORT, () => {
+    console.log(`Claudio FM 服务已启动: https://localhost:${PORT}`);
+  });
+} else {
+  app.listen(PORT, () => {
+    console.log(`Claudio FM 服务已启动: http://localhost:${PORT}`);
+  });
+}
 
 module.exports = { app, db };

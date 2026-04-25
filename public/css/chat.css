@@ -84,14 +84,14 @@
 }
 
 .msg.assistant .msg-bubble {
-  background: var(--bg-card);
-  border: 1px solid var(--border-subtle);
+  background: rgba(255,255,255,0.1);
+  border: 1px solid rgba(255,255,255,0.05);
   border-bottom-left-radius: 4px;
 }
 
 .msg.user .msg-bubble {
-  background: var(--color-primary);
-  color: #fff;
+  background: rgba(255,255,255,0.2);
+  color: var(--text-primary);
   border-bottom-right-radius: 4px;
 }
 
@@ -205,15 +205,17 @@
 .send-btn {
   width: 40px; height: 40px;
   border-radius: 50%;
-  border: none;
-  background: var(--color-primary);
-  color: #fff;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(255,255,255,0.1);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  color: var(--text-primary);
   cursor: pointer;
   display: grid; place-items: center;
   font-size: 16px;
-  transition: opacity 0.15s;
+  transition: background 0.15s;
 }
-.send-btn:hover { opacity: 0.85; }
+.send-btn:hover { background: rgba(255,255,255,0.18); }
 .send-btn:disabled { opacity: 0.3; cursor: default; }
 
 /* AI 思考中动画 */

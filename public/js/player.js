@@ -3,6 +3,7 @@ import { netease, server } from './api.js';
 
 const audio = new Audio();
 audio.preload = 'auto';
+audio.crossOrigin = 'anonymous';
 
 let currentSong = null;
 let queue = [];
@@ -447,3 +448,5 @@ export async function restorePlayback() {
 
 // 导出给全局使用
 window.player = { playSong, setQueue, addToQueue, playNext, playPrev, getCurrentSong: () => currentSong };
+
+export function getAudioElement() { return audio; }

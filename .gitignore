@@ -3,3 +3,5 @@ data/
 .env
 .superpowers/
 .DS_Store
+certs/
+public/rootCA.pem
