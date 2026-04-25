@@ -29,12 +29,15 @@ const volumeSlider = $('volumeSlider');
 const volumeIcon = $('volumeIcon');
 
 // 音量控制
-let savedVolume = 0.8;
-audio.volume = parseFloat(volumeSlider?.value || 0.8);
+let savedVolume = parseFloat(localStorage.getItem('claudio_volume') ?? '0.8');
+audio.volume = savedVolume;
+if (volumeSlider) volumeSlider.value = savedVolume;
+volumeIcon.textContent = savedVolume === 0 ? '🔇' : savedVolume < 0.4 ? '🔉' : '🔊';
 
 volumeSlider?.addEventListener('input', () => {
   audio.volume = parseFloat(volumeSlider.value);
   savedVolume = audio.volume;
+  localStorage.setItem('claudio_volume', savedVolume);
   volumeIcon.textContent = audio.volume === 0 ? '🔇' : audio.volume < 0.4 ? '🔉' : '🔊';
 });
 
@@ -49,6 +52,7 @@ volumeIcon?.addEventListener('click', () => {
     volumeSlider.value = audio.volume;
     volumeIcon.textContent = audio.volume < 0.4 ? '🔉' : '🔊';
   }
+  localStorage.setItem('claudio_volume', audio.volume);
 });
 
 // 播放列表面板
