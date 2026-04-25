@@ -237,6 +237,19 @@ html, body {
   transition: color 0.15s, background 0.15s;
 }
 .panel-song-play:hover, .panel-song-add:hover { color: var(--text-primary); background: rgba(255,255,255,0.08); }
+.panel-song-del {
+  width: 28px; height: 28px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 50%;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  display: grid; place-items: center;
+  flex-shrink: 0;
+  transition: color 0.15s, background 0.15s;
+}
+.panel-song-del:hover { color: var(--color-accent); background: rgba(255,255,255,0.08); }
 
 /* 配置面板 */
 .config-group { margin-bottom: 16px; }

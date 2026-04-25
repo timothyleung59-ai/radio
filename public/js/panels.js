@@ -19,6 +19,7 @@ async function loadFavorites() {
           </div>
           <button class="panel-song-play" data-song='${JSON.stringify(favToSong(s))}' title="播放">▶</button>
           <button class="panel-song-add" data-song='${JSON.stringify(favToSong(s))}' title="加入队列">+</button>
+          <button class="panel-song-del" data-id="${s.song_id}" title="取消收藏">✕</button>
         </div>
       `).join('');
 
@@ -36,6 +37,13 @@ async function loadFavorites() {
         const song = JSON.parse(btn.dataset.song);
         window.player?.addToQueue?.([song]);
         window.showToast(`已加入队列：${song.name}`);
+      });
+    });
+    document.querySelectorAll('.panel-song-del').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        await server.del(`/api/favorites/${btn.dataset.id}`);
+        window.showToast('已取消收藏');
+        loadFavorites();
       });
     });
   } catch (e) {
