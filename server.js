@@ -402,7 +402,7 @@ app.post('/api/dispatch', async (req, res) => {
 
     const stream = await anthropic.messages.stream({
       model: 'mimo-v2.5-pro',
-      max_tokens: 1024,
+      max_tokens: 4096,
       system: systemPrompt,
       messages
     });

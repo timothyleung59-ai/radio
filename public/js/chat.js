@@ -103,9 +103,17 @@ async function sendMessage() {
           }
 
           if (data.type === 'done') {
-            // 渲染最终结构化内容
-            if (data.parsed) {
-              const { say, reason, play, segue } = data.parsed;
+            // 渲染最终结构化内容 — 尝试客户端解析兜底
+            let parsed = data.parsed;
+            if ((!parsed?.play || parsed.play.length === 0) && fullText) {
+              try { parsed = JSON.parse(fullText); } catch {}
+              if (!parsed?.play?.length) {
+                const m = fullText.match(/"play"\s*:\s*(\[[\s\S]*?\])/);
+                if (m) try { parsed = { ...parsed, play: JSON.parse(m[1]) }; } catch {}
+              }
+            }
+            if (parsed) {
+              const { say, reason, play, segue } = parsed;
               let html = '';
               if (say || reason) html += `<div>${[say, reason].filter(Boolean).join('\n\n')}</div>`;
 
