@@ -36,6 +36,19 @@
 }
 .chat-header-btn:hover { color: var(--text-primary); border-color: var(--color-primary); }
 
+.player-toggle {
+  width: 32px; height: 32px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 50%;
+  background: rgba(255,255,255,0.05);
+  color: var(--text-muted);
+  display: grid; place-items: center;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, transform 0.3s;
+}
+.player-toggle:hover { color: var(--text-primary); border-color: var(--color-primary); }
+.player-toggle.flipped { transform: rotate(180deg); }
+
 .chat-messages {
   flex: 1;
   overflow-y: auto;

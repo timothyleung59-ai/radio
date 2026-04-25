@@ -357,6 +357,7 @@ const miniNextBtn = $('miniNextBtn');
 const miniCover = $('miniCover');
 const miniTitle = $('miniTitle');
 const miniProgressFill = $('miniProgressFill');
+const playerToggle = $('playerToggle');
 
 let playerCollapsed = false;
 
@@ -364,9 +365,11 @@ function setPlayerCollapsed(collapsed) {
   playerCollapsed = collapsed;
   playerSection.classList.toggle('collapsed', collapsed);
   miniPlayer.classList.toggle('show', collapsed);
+  playerToggle?.classList.toggle('flipped', !collapsed);
 }
 
 playerCollapse?.addEventListener('click', () => setPlayerCollapsed(true));
+playerToggle?.addEventListener('click', () => setPlayerCollapsed(!playerCollapsed));
 miniPlayer?.addEventListener('click', (e) => {
   if (e.target.closest('.mini-ctrl')) return;
   setPlayerCollapsed(false);
