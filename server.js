@@ -237,6 +237,51 @@ app.post('/api/config/:filename', (req, res) => {
   res.json({ ok: true });
 });
 
+// ========== 网易云 API 代理（避免浏览器 CORS） ==========
+const NETEASE_API = process.env.NETEASE_API || 'http://192.168.5.103:3000';
+
+app.get('/api/netease/search', async (req, res) => {
+  try {
+    const { keywords, limit = 20 } = req.query;
+    const r = await fetch(`${NETEASE_API}/cloudsearch?keywords=${encodeURIComponent(keywords)}&type=1&limit=${limit}`);
+    const data = await r.json();
+    res.json(data);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/netease/song/url', async (req, res) => {
+  try {
+    const { id, br = 320000 } = req.query;
+    const r = await fetch(`${NETEASE_API}/song/url?id=${id}&br=${br}`);
+    const data = await r.json();
+    res.json(data);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/netease/lyric', async (req, res) => {
+  try {
+    const r = await fetch(`${NETEASE_API}/lyric?id=${req.query.id}`);
+    const data = await r.json();
+    res.json(data);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/netease/personalized', async (req, res) => {
+  try {
+    const r = await fetch(`${NETEASE_API}/personalized?limit=${req.query.limit || 10}`);
+    const data = await r.json();
+    res.json(data);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/netease/playlist/detail', async (req, res) => {
+  try {
+    const r = await fetch(`${NETEASE_API}/playlist/detail?id=${req.query.id}`);
+    const data = await r.json();
+    res.json(data);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ========== Mock 日历 API ==========
 app.get('/api/schedule', (req, res) => {
   const fp = path.join(configDir, 'schedule.json');
@@ -331,7 +376,7 @@ app.post('/api/dispatch', async (req, res) => {
 
   // 默认走 Claude
   try {
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });
 
     // 获取聊天历史
     const history = db.prepare('SELECT * FROM chat_messages ORDER BY id DESC LIMIT 20').all().reverse();
@@ -345,7 +390,7 @@ app.post('/api/dispatch', async (req, res) => {
     const systemPrompt = buildSystemPrompt(currentSong, history);
 
     const stream = await anthropic.messages.stream({
-      model: 'claude-sonnet-4-20250514',
+      model: 'mimo-v2.5-pro',
       max_tokens: 1024,
       system: systemPrompt,
       messages
@@ -407,7 +452,7 @@ cron.schedule('0 7 * * *', async () => {
   console.log('执行每日歌单推荐...');
   schedulerStatus.dailyPlaylist.status = 'running';
   try {
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });
     const history = db.prepare('SELECT * FROM play_history ORDER BY played_at DESC LIMIT 50').all();
 
     const prompt = `根据以下信息，推荐今日歌单（10首歌），返回 JSON 格式：
@@ -417,7 +462,7 @@ ${configCache.taste ? '品味偏好：' + configCache.taste : ''}
 最近听歌记录：${history.map(h => h.song_name + ' - ' + h.artist).join(', ')}`;
 
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'mimo-v2.5-pro',
       max_tokens: 1024,
       messages: [{ role: 'user', content: prompt }]
     });
@@ -450,7 +495,7 @@ cron.schedule('0 * * * *', async () => {
   console.log('执行情绪检查...');
   schedulerStatus.moodCheck.status = 'running';
   try {
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });
     const hour = new Date().getHours();
     const recentChats = db.prepare('SELECT * FROM chat_messages ORDER BY id DESC LIMIT 10').all();
 
@@ -462,7 +507,7 @@ ${configCache.moodrules ? '情绪规则：' + configCache.moodrules : ''}
 {"mood": "情绪标签", "genre": "推荐曲风", "message": "一句话描述"}`;
 
     const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
+      model: 'mimo-v2.5-pro',
       max_tokens: 256,
       messages: [{ role: 'user', content: prompt }]
     });

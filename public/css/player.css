@@ -161,3 +161,80 @@
   font-size: 22px;
 }
 .play-btn:hover { background: var(--text-primary); transform: scale(1.04); }
+
+/* 音量条 */
+.volume-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  margin-top: 6px;
+}
+.volume-icon {
+  font-size: 16px;
+  cursor: pointer;
+  user-select: none;
+  min-width: 20px;
+  text-align: center;
+}
+.volume-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255,255,255,0.15);
+  outline: none;
+  cursor: pointer;
+}
+.volume-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--text-primary);
+  cursor: pointer;
+  transition: transform 0.12s;
+}
+.volume-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.25);
+}
+.volume-slider::-moz-range-thumb {
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--text-primary);
+  border: none;
+  cursor: pointer;
+}
+
+/* 顶部菜单下拉 */
+.topbar-menu {
+  position: absolute;
+  top: 48px;
+  right: 12px;
+  background: var(--bg-card, rgba(30,30,30,0.95));
+  border-radius: 12px;
+  padding: 6px 0;
+  min-width: 160px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(255,255,255,0.08);
+  z-index: 200;
+  display: none;
+}
+.topbar-menu.show { display: block; }
+.topbar-menu-item {
+  display: block;
+  width: 100%;
+  padding: 10px 16px;
+  border: none;
+  background: none;
+  color: var(--text-primary);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.topbar-menu-item:hover {
+  background: rgba(255,255,255,0.08);
+}

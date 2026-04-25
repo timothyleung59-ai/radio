@@ -25,6 +25,31 @@ const currentTimeEl = $('currentTime');
 const totalTimeEl = $('totalTime');
 const progressTrack = $('progressTrack');
 const progressFill = $('progressFill');
+const volumeSlider = $('volumeSlider');
+const volumeIcon = $('volumeIcon');
+
+// 音量控制
+let savedVolume = 0.8;
+audio.volume = parseFloat(volumeSlider?.value || 0.8);
+
+volumeSlider?.addEventListener('input', () => {
+  audio.volume = parseFloat(volumeSlider.value);
+  savedVolume = audio.volume;
+  volumeIcon.textContent = audio.volume === 0 ? '🔇' : audio.volume < 0.4 ? '🔉' : '🔊';
+});
+
+volumeIcon?.addEventListener('click', () => {
+  if (audio.volume > 0) {
+    savedVolume = audio.volume;
+    audio.volume = 0;
+    volumeSlider.value = 0;
+    volumeIcon.textContent = '🔇';
+  } else {
+    audio.volume = savedVolume || 0.8;
+    volumeSlider.value = audio.volume;
+    volumeIcon.textContent = audio.volume < 0.4 ? '🔉' : '🔊';
+  }
+});
 
 function formatTime(s) {
   s = Math.max(0, Math.floor(s));
@@ -225,7 +250,7 @@ window.addEventListener('voiceStart', () => {
 
 window.addEventListener('voiceEnd', () => {
   // 渐变恢复音量
-  const target = parseFloat(document.querySelector('#volumeSlider')?.value || 0.8);
+  const target = savedVolume;
   let current = 0.2;
   const fade = setInterval(() => {
     current = Math.min(current + 0.05, target);

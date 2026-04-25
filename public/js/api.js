@@ -1,9 +1,8 @@
-// public/js/api.js
-const NETEASE_API = 'http://192.168.5.103:3000';
+// public/js/api.js — 所有网易云请求通过服务端代理，避免 CORS
 
 export const netease = {
   async search(keywords, limit = 20) {
-    const res = await fetch(`${NETEASE_API}/cloudsearch?keywords=${encodeURIComponent(keywords)}&type=1&limit=${limit}`);
+    const res = await fetch(`/api/netease/search?keywords=${encodeURIComponent(keywords)}&limit=${limit}`);
     const data = await res.json();
     if (!data.result?.songs) return [];
     return data.result.songs.map(s => ({
@@ -17,13 +16,13 @@ export const netease = {
   },
 
   async getSongUrl(id) {
-    const res = await fetch(`${NETEASE_API}/song/url?id=${id}&br=320000`);
+    const res = await fetch(`/api/netease/song/url?id=${id}&br=320000`);
     const data = await res.json();
     return data.data?.[0]?.url || null;
   },
 
   async getLyrics(id) {
-    const res = await fetch(`${NETEASE_API}/lyric?id=${id}`);
+    const res = await fetch(`/api/netease/lyric?id=${id}`);
     const data = await res.json();
     return {
       lrc: data.lrc?.lyric || '',
@@ -32,13 +31,13 @@ export const netease = {
   },
 
   async getPersonalized(limit = 10) {
-    const res = await fetch(`${NETEASE_API}/personalized?limit=${limit}`);
+    const res = await fetch(`/api/netease/personalized?limit=${limit}`);
     const data = await res.json();
     return data.result || [];
   },
 
   async getPlaylistDetail(id) {
-    const res = await fetch(`${NETEASE_API}/playlist/detail?id=${id}`);
+    const res = await fetch(`/api/netease/playlist/detail?id=${id}`);
     const data = await res.json();
     const pl = data.playlist;
     if (!pl) return null;
