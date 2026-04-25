@@ -12,10 +12,15 @@ function formatTime(s) {
   return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
 }
 
+const avatarSrc = {
+  assistant: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32'%3E%3Ccircle fill='%234a6cf7' cx='16' cy='16' r='16'/%3E%3Ctext x='16' y='20' fill='%23fff' font-size='14' text-anchor='middle'%3EC%3C/text%3E%3C/svg%3E",
+  user: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32'%3E%3Ccircle fill='%239b59b6' cx='16' cy='16' r='16'/%3E%3Ctext x='16' y='20' fill='%23fff' font-size='14' text-anchor='middle'%3EY%3C/text%3E%3C/svg%3E"
+};
+
 function addMessage(role, content, extra = '') {
   const msg = document.createElement('div');
   msg.className = `msg ${role}`;
-  msg.innerHTML = `<div class="msg-bubble">${content}${extra}</div>`;
+  msg.innerHTML = `<img class="msg-avatar" src="${avatarSrc[role]}" alt=""><div class="msg-bubble">${content}${extra}</div>`;
   chatMessages.appendChild(msg);
   chatMessages.scrollTop = chatMessages.scrollHeight;
   return msg;
