@@ -123,6 +123,9 @@ async function sendMessage() {
               if (segue) html += renderVoiceMsg(segue);
               if (resolvedSongs.length > 0) {
                 html += resolvedSongs.map(s => renderSongCard(s)).join('');
+                // 自动加入队列并播放第一首
+                window.player?.addToQueue?.(resolvedSongs);
+                window.player?.playSong?.(resolvedSongs[0]);
               }
               if (assistantMsg) {
                 assistantMsg.querySelector('.msg-bubble').innerHTML = html;

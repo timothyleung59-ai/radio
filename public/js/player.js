@@ -116,6 +116,10 @@ export function setQueue(songs, startIndex = 0) {
   queueIndex = startIndex;
 }
 
+export function addToQueue(songs) {
+  queue.push(...songs);
+}
+
 export function playNext() {
   if (queue.length === 0) return;
   if (playMode === 'shuffle') {
@@ -281,4 +285,4 @@ export async function restorePlayback() {
 }
 
 // 导出给全局使用
-window.player = { playSong, setQueue, playNext, playPrev, getCurrentSong: () => currentSong };
+window.player = { playSong, setQueue, addToQueue, playNext, playPrev, getCurrentSong: () => currentSong };
