@@ -51,6 +51,75 @@ volumeIcon?.addEventListener('click', () => {
   }
 });
 
+// 播放列表面板
+const queueBtn = $('queueBtn');
+const queuePanel = $('queuePanel');
+const queueList = $('queueList');
+const queueCount = $('queueCount');
+const queuePanelCount = $('queuePanelCount');
+
+function updateQueueCount() {
+  const n = queue.length;
+  queueCount.textContent = n;
+  queueCount.dataset.count = n;
+}
+
+function renderQueuePanel() {
+  queuePanelCount.textContent = `(${queue.length}首)`;
+  if (queue.length === 0) {
+    queueList.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:40px 0">播放列表为空</p>';
+    return;
+  }
+  queueList.innerHTML = queue.map((s, i) => `
+    <div class="queue-item ${i === queueIndex ? 'playing' : ''}" data-index="${i}">
+      <img class="queue-item-cover" src="${s.cover || ''}" alt="" onerror="this.style.display='none'">
+      <div class="queue-item-info">
+        <div class="queue-item-name">${s.name || '未知歌曲'}</div>
+        <div class="queue-item-artist">${s.artist || ''}</div>
+      </div>
+      <button class="queue-item-remove" data-index="${i}" title="移除">✕</button>
+    </div>
+  `).join('');
+
+  // 点击播放
+  queueList.querySelectorAll('.queue-item').forEach(el => {
+    el.addEventListener('click', (e) => {
+      if (e.target.closest('.queue-item-remove')) return;
+      const idx = parseInt(el.dataset.index);
+      queueIndex = idx;
+      playSong(queue[idx]);
+      renderQueuePanel();
+    });
+  });
+
+  // 移除
+  queueList.querySelectorAll('.queue-item-remove').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = parseInt(btn.dataset.index);
+      queue.splice(idx, 1);
+      if (queueIndex >= queue.length) queueIndex = Math.max(0, queue.length - 1);
+      else if (idx < queueIndex) queueIndex--;
+      updateQueueCount();
+      renderQueuePanel();
+      savePlaybackState();
+    });
+  });
+
+  // 滚动到当前播放
+  const current = queueList.querySelector('.queue-item.playing');
+  if (current) current.scrollIntoView({ block: 'nearest' });
+}
+
+queueBtn?.addEventListener('click', () => {
+  renderQueuePanel();
+  queuePanel.style.display = 'flex';
+});
+
+queuePanel?.addEventListener('click', (e) => {
+  if (e.target === queuePanel) queuePanel.style.display = 'none';
+});
+
 function formatTime(s) {
   s = Math.max(0, Math.floor(s));
   return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`;
@@ -114,11 +183,13 @@ export async function playSong(song) {
 export function setQueue(songs, startIndex = 0) {
   queue = songs;
   queueIndex = startIndex;
+  updateQueueCount();
   savePlaybackState();
 }
 
 export function addToQueue(songs) {
   queue.push(...songs);
+  updateQueueCount();
   savePlaybackState();
 }
 
@@ -304,6 +375,7 @@ export async function restorePlayback() {
       }
     } catch(e) {}
   }
+  updateQueueCount();
 }
 
 // 导出给全局使用

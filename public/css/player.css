@@ -238,3 +238,81 @@
 .topbar-menu-item:hover {
   background: rgba(255,255,255,0.08);
 }
+
+/* 播放列表按钮 */
+.queue-btn {
+  position: relative;
+  width: 32px; height: 32px;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: grid; place-items: center;
+  border-radius: 6px;
+  flex-shrink: 0;
+  transition: color 0.15s, background 0.15s;
+}
+.queue-btn:hover { color: var(--text-primary); background: rgba(255,255,255,0.08); }
+.queue-count {
+  position: absolute;
+  top: 2px; right: 0;
+  font-size: 9px;
+  font-weight: 600;
+  background: var(--color-accent);
+  color: #fff;
+  min-width: 14px; height: 14px;
+  border-radius: 7px;
+  display: grid; place-items: center;
+  padding: 0 3px;
+  line-height: 1;
+}
+.queue-count:empty, .queue-count[data-count="0"] { display: none; }
+
+/* 播放列表面板内歌曲行 */
+.queue-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 20px;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.queue-item:hover { background: rgba(255,255,255,0.05); }
+.queue-item.playing { background: rgba(74,108,247,0.12); }
+.queue-item.playing .queue-item-name { color: var(--color-primary); }
+.queue-item-cover {
+  width: 36px; height: 36px;
+  border-radius: 6px;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.queue-item-info { flex: 1; min-width: 0; }
+.queue-item-name {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.queue-item-artist {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.queue-item-remove {
+  width: 28px; height: 28px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  border-radius: 50%;
+  display: grid; place-items: center;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+}
+.queue-item:hover .queue-item-remove { opacity: 1; }
+.queue-item-remove:hover { color: var(--color-accent); }

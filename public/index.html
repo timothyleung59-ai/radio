@@ -77,6 +77,10 @@
         <div class="volume-bar">
           <span class="volume-icon" id="volumeIcon">🔊</span>
           <input type="range" class="volume-slider" id="volumeSlider" min="0" max="1" step="0.01" value="0.8">
+          <button class="queue-btn" id="queueBtn" title="播放列表">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+            <span class="queue-count" id="queueCount">0</span>
+          </button>
         </div>
       </div>
     </div>
@@ -149,6 +153,17 @@
     <button class="voice-close" id="voiceClose">✕</button>
     <canvas class="voice-wave-canvas" id="voiceWaveCanvas" width="400" height="120"></canvas>
     <div class="voice-text" id="voiceText"></div>
+  </div>
+
+  <!-- 播放列表面板 -->
+  <div class="panel-overlay" id="queuePanel" style="display:none">
+    <div class="panel-content">
+      <div class="panel-header">
+        <h3>播放列表 <span id="queuePanelCount" style="color:var(--text-muted);font-size:13px"></span></h3>
+        <button class="panel-close" onclick="document.getElementById('queuePanel').style.display='none'">✕</button>
+      </div>
+      <div class="panel-body" id="queueList" style="padding:8px 0"></div>
+    </div>
   </div>
 
   <div class="toast" id="toast"></div>
