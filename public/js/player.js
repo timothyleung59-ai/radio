@@ -352,7 +352,6 @@ window.addEventListener('voiceEnd', () => {
 // ========== 播放器展开/收起 ==========
 const playerSection = $('playerSection');
 const miniPlayer = $('miniPlayer');
-const playerCollapse = $('playerCollapse');
 const miniPlayBtn = $('miniPlayBtn');
 const miniNextBtn = $('miniNextBtn');
 const miniLikeBtn = $('miniLikeBtn');
@@ -370,7 +369,6 @@ function setPlayerCollapsed(collapsed) {
   playerToggle?.classList.toggle('flipped', !collapsed);
 }
 
-playerCollapse?.addEventListener('click', () => setPlayerCollapsed(true));
 playerToggle?.addEventListener('click', () => setPlayerCollapsed(!playerCollapsed));
 miniPlayer?.addEventListener('click', (e) => {
   if (e.target.closest('.mini-ctrl')) return;
