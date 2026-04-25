@@ -152,20 +152,51 @@ async function checkLiked() {
 }
 
 export async function playSong(song) {
-  if (!song || !song.id) return;
+  if (!song || !song.name) return;
 
-  const url = await netease.getSongUrl(song.id);
+  // 通过歌名+歌手搜索补全缺失的 ID 或封面
+  async function searchResolve(s) {
+    const keyword = `${s.name} ${s.artist || ''}`.trim();
+    const results = await netease.search(keyword, 3);
+    return results.find(r => r.name === s.name) || results[0] || null;
+  }
+
+  if (!song.id || !song.cover) {
+    const match = await searchResolve(song);
+    if (match) {
+      song = { ...song, id: song.id || match.id, cover: song.cover || match.cover };
+    } else if (!song.id) {
+      window.showToast(`${song.name} 暂无音源，自动跳过`);
+      if (queue.length > 1) playNext();
+      return;
+    }
+  }
+
+  let url = await netease.getSongUrl(song.id);
+  // 音源获取失败，尝试重新搜索
   if (!url) {
-    window.showToast('暂无音源');
+    const match = await searchResolve(song);
+    if (match) {
+      song = { ...song, id: match.id, cover: song.cover || match.cover };
+      url = await netease.getSongUrl(match.id);
+    }
+  }
+  if (!url) {
+    window.showToast(`${song.name} 暂无音源，自动跳过`);
+    if (queue.length > 1) playNext();
     return;
   }
 
   currentSong = song;
+  // 同步更新队列中这首歌的真实数据，下次播放不用再搜
+  if (queue[queueIndex] && queue[queueIndex].name === song.name) {
+    queue[queueIndex] = song;
+  }
   audio.src = url;
   audio.play().catch(() => {});
 
   songTitle.textContent = `${song.name} — ${song.artist}`;
-  if (song.cover) coverImg.src = song.cover;
+  coverImg.src = song.cover || coverImg.src;
 
   updatePlayButton();
   checkLiked();
@@ -196,7 +227,10 @@ export function setQueue(songs, startIndex = 0) {
 }
 
 export function addToQueue(songs) {
-  queue.push(...songs);
+  const existing = new Set(queue.map(s => s.id));
+  const newSongs = songs.filter(s => !existing.has(s.id));
+  if (newSongs.length === 0) return;
+  queue.push(...newSongs);
   updateQueueCount();
   savePlaybackState();
 }
@@ -328,7 +362,17 @@ audio.addEventListener('ended', () => {
     audio.currentTime = 0;
     audio.play();
   } else {
-    playNext();
+    // 从队列中移除已播完的歌
+    if (queue.length > 0) {
+      queue.splice(queueIndex, 1);
+      updateQueueCount();
+      savePlaybackState();
+    }
+    if (queue.length > 0) {
+      // splice后当前index已指向下一首，playNext会+1，所以先回退
+      queueIndex = (queueIndex - 1 + queue.length) % queue.length;
+      playNext();
+    }
   }
 });
 audio.addEventListener('play', () => { updatePlayButton(); syncMiniPlayer(); });

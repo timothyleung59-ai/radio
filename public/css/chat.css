@@ -160,7 +160,7 @@
 /* 语音消息 */
 .voice-msg {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   padding: 8px 12px;
   background: rgba(255,255,255,0.05);
@@ -169,14 +169,11 @@
   cursor: pointer;
 }
 
-.voice-wave {
-  height: 24px;
+.voice-msg .voice-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.6;
   flex: 1;
-}
-
-.voice-duration {
-  font-size: 11px;
-  color: var(--text-muted);
 }
 
 /* 聊天输入 */

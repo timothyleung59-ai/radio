@@ -286,6 +286,21 @@ function neteaseUrl(path, params = {}) {
   return url.toString();
 }
 
+// 服务端解析歌曲：AI 返回的歌名 → 网易云真实数据
+async function resolveSong(song) {
+  try {
+    const keyword = `${song.name || ''} ${song.artist || ''}`.trim();
+    if (!keyword) return song;
+    const r = await fetch(neteaseUrl('/cloudsearch', { keywords: keyword, type: 1, limit: 3 }));
+    const data = await r.json();
+    const results = data?.result?.songs || [];
+    const match = results.find(r => r.name === song.name) || results[0];
+    if (!match) return song;
+    const cover = match.al?.picUrl || '';
+    return { id: String(match.id), name: match.name, artist: (match.ar || []).map(a => a.name).join('/'), album: match.al?.name || '', cover, reason: song.reason || '' };
+  } catch { return song; }
+}
+
 app.get('/api/netease/search', async (req, res) => {
   try {
     const { keywords, limit = 20 } = req.query;
@@ -367,6 +382,11 @@ function buildSystemPrompt(currentSong, chatHistory) {
   if (configCache.taste) parts.push(`## 音乐品味\n${configCache.taste}`);
   if (configCache.routines) parts.push(`## 行为习惯\n${configCache.routines}`);
   if (configCache.moodrules) parts.push(`## 情绪规则\n${configCache.moodrules}`);
+
+  const now = new Date();
+  const weekDays = ['日', '一', '二', '三', '四', '五', '六'];
+  const timeStr = `${now.getFullYear()}年${now.getMonth()+1}月${now.getDate()}日 周${weekDays[now.getDay()]} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+  parts.push(`## 当前时间\n${timeStr}`);
 
   if (currentSong) {
     parts.push(`## 当前播放\n歌曲：${currentSong.name}，艺术家：${currentSong.artist}，专辑：${currentSong.album || '未知'}`);
@@ -463,7 +483,7 @@ app.post('/api/dispatch', async (req, res) => {
       res.write(`data: ${JSON.stringify({ type: 'text', text })}\n\n`);
     });
 
-    stream.on('end', () => {
+    stream.on('end', async () => {
       // 保存消息
       db.prepare('INSERT INTO chat_messages (role, content) VALUES (?, ?)').run('user', message);
 
@@ -490,8 +510,11 @@ app.post('/api/dispatch', async (req, res) => {
         loadConfigFiles();
       }
 
-      // 提取歌曲卡片
-      const songCards = parsed.play || [];
+      // 提取歌曲卡片，并通过网易云搜索补全真实数据
+      const rawSongs = parsed.play || [];
+      const songCards = rawSongs.length > 0
+        ? await Promise.all(rawSongs.map(s => resolveSong(s)))
+        : [];
 
       db.prepare('INSERT INTO chat_messages (role, content, song_cards) VALUES (?, ?, ?)')
         .run('assistant', fullContent, JSON.stringify(songCards));

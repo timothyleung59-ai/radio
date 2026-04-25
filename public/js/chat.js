@@ -43,11 +43,11 @@ function renderSongCard(song, disabled = false) {
 }
 
 function renderVoiceMsg(text) {
+  const safe = text.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/`/g, '\\`');
   return `
     <div class="voice-msg" onclick="window.voice && window.voice.speak(\`${text.replace(/`/g, '\\`')}\`)">
       <span style="font-size:14px">🎙</span>
-      <canvas class="voice-wave" width="200" height="24"></canvas>
-      <span class="voice-duration">点击播放语音</span>
+      <span class="voice-text">${safe}</span>
     </div>
   `;
 }
@@ -266,16 +266,34 @@ export async function loadChatHistory() {
       if (msg.role === 'user') {
         addMessage('user', msg.content);
       } else {
-        let extra = '';
-        if (msg.song_cards) {
-          try {
-            const cards = JSON.parse(msg.song_cards);
-            if (cards.length > 0) {
-              extra = cards.map(s => renderSongCard(s)).join('');
-            }
-          } catch(e) {}
+        // 尝试解析结构化回复
+        let parsed = null;
+        try { parsed = JSON.parse(msg.content); } catch {}
+        const hasStructure = parsed && (parsed.say || parsed.play || parsed.segue);
+
+        if (hasStructure) {
+          let html = '';
+          if (parsed.say || parsed.reason) html += `<div>${[parsed.say, parsed.reason].filter(Boolean).join('\n\n')}</div>`;
+          // 优先用 song_cards（已 resolve 的真实数据），兜底用 parsed.play
+          let songs = [];
+          if (msg.song_cards) {
+            try { songs = JSON.parse(msg.song_cards); } catch {}
+          }
+          if (songs.length === 0 && parsed.play) songs = parsed.play;
+          if (parsed.segue) html += renderVoiceMsg(parsed.segue);
+          if (songs.length > 0) html += songs.map(s => renderSongCard(s)).join('');
+          addMessage('assistant', html);
+        } else {
+          // 纯文本回复
+          let extra = '';
+          if (msg.song_cards) {
+            try {
+              const cards = JSON.parse(msg.song_cards);
+              if (cards.length > 0) extra = cards.map(s => renderSongCard(s)).join('');
+            } catch {}
+          }
+          addMessage('assistant', msg.content, extra);
         }
-        addMessage('assistant', msg.content, extra);
       }
     }
     bindSongCardButtons();

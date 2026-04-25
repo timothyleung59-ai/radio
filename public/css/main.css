@@ -43,6 +43,9 @@ html, body {
   z-index: 2;
   max-width: 440px;
   margin: 0 auto;
+  border: 1px solid rgba(180, 140, 255, 0.15);
+  border-radius: 24px;
+  overflow: hidden;
 }
 
 /* 流体背景 */
@@ -200,6 +203,13 @@ html, body {
 .panel-song-info { flex: 1; min-width: 0; }
 .panel-song-name { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .panel-song-artist { font-size: 11px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.panel-song-time {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
 .panel-song-play, .panel-song-add {
   width: 28px; height: 28px;
   border: 1px solid var(--border-subtle);

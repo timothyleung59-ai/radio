@@ -373,9 +373,126 @@ export function burstParticles(x, y, color = '#4a6cf7') {
   }
 }
 
+// ========== 边缘海浪光效 ==========
+function initBorderGlow() {
+  const canvas = document.createElement('canvas');
+  canvas.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:1;';
+  document.body.appendChild(canvas);
+  const ctx = canvas.getContext('2d');
+
+  function resize() {
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = window.innerWidth * dpr;
+    canvas.height = window.innerHeight * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  function wave(seed, t, pos) {
+    return Math.sin(pos * 0.008 + t * 0.4 + seed) * 0.35
+         + Math.sin(pos * 0.015 - t * 0.25 + seed * 2.7) * 0.25
+         + Math.sin(pos * 0.003 + t * 0.15 + seed * 0.5) * 0.4;
+  }
+
+  function draw() {
+    const W = window.innerWidth, H = window.innerHeight;
+    ctx.clearRect(0, 0, W, H);
+
+    const appEl = document.getElementById('app');
+    if (!appEl) { requestAnimationFrame(draw); return; }
+    const r = appEl.getBoundingClientRect();
+    const R = 24; // border-radius
+    const t = performance.now() * 0.001;
+    const amp = 10; // 波浪幅度
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    ctx.beginPath();
+
+    // 沿圆角矩形路径走一圈，每条边加波浪偏移（法线方向）
+    // 顶部边（从右到左）
+    for (let x = r.right - R; x >= r.left + R; x -= 3) {
+      const wv = wave(0, t, x) * amp;
+      ctx.lineTo(x, r.top + wv);
+    }
+
+    // 左上角（圆弧）
+    for (let a = Math.PI * 1.5; a >= Math.PI; a -= 0.06) {
+      const cx = r.left + R, cy = r.top + R;
+      const wv = wave(1, t, a * 100) * amp * 0.6;
+      ctx.lineTo(cx + Math.cos(a) * (R + wv), cy + Math.sin(a) * (R + wv));
+    }
+
+    // 左边（从上到下）
+    for (let y = r.top + R; y <= r.bottom - R; y += 3) {
+      const wv = wave(2, t, y) * amp;
+      ctx.lineTo(r.left + wv, y);
+    }
+
+    // 左下角
+    for (let a = Math.PI; a >= Math.PI * 0.5; a -= 0.06) {
+      const cx = r.left + R, cy = r.bottom - R;
+      const wv = wave(3, t, a * 100) * amp * 0.6;
+      ctx.lineTo(cx + Math.cos(a) * (R + wv), cy + Math.sin(a) * (R + wv));
+    }
+
+    // 底部（从左到右）
+    for (let x = r.left + R; x <= r.right - R; x += 3) {
+      const wv = wave(4, t, x) * amp;
+      ctx.lineTo(x, r.bottom + wv);
+    }
+
+    // 右下角
+    for (let a = Math.PI * 0.5; a >= 0; a -= 0.06) {
+      const cx = r.right - R, cy = r.bottom - R;
+      const wv = wave(5, t, a * 100) * amp * 0.6;
+      ctx.lineTo(cx + Math.cos(a) * (R + wv), cy + Math.sin(a) * (R + wv));
+    }
+
+    // 右边（从下到上）
+    for (let y = r.bottom - R; y >= r.top + R; y -= 3) {
+      const wv = wave(6, t, y) * amp;
+      ctx.lineTo(r.right + wv, y);
+    }
+
+    // 右上角
+    for (let a = 0; a <= Math.PI * 0.5; a += 0.06) {
+      const cx = r.right - R, cy = r.top + R;
+      const wv = wave(7, t, a * 100) * amp * 0.6;
+      ctx.lineTo(cx + Math.cos(a) * (R + wv), cy + Math.sin(a) * (R + wv));
+    }
+
+    ctx.closePath();
+
+    // 多层叠加：宽线+高模糊 → 窄线+低模糊，营造柔和光晕
+    const layers = [
+      { w: 80, blur: 40, alpha: 0.08 },
+      { w: 55, blur: 25, alpha: 0.15 },
+      { w: 35, blur: 12, alpha: 0.25 },
+      { w: 18, blur: 5,  alpha: 0.35 },
+    ];
+    for (const l of layers) {
+      ctx.lineWidth = l.w;
+      ctx.filter = `blur(${l.blur}px)`;
+      ctx.strokeStyle = `rgba(170, 130, 255, ${l.alpha})`;
+      ctx.stroke();
+    }
+    ctx.filter = 'none';
+    ctx.restore();
+
+    requestAnimationFrame(draw);
+  }
+
+  requestAnimationFrame(draw);
+}
+
 // ========== 初始化 ==========
 export function initVisual() {
   initTheme();
   initCoverFlip();
+  initBorderGlow();
   initParticles();
 }
