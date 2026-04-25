@@ -236,8 +236,7 @@ function toggleShuffle() {
 }
 
 function updateRepeatIcon() {
-  const icons = { off: '↻', all: '↻', one: '🔂' };
-  repeatBtn.textContent = icons[playMode];
+  repeatBtn.innerHTML = playMode === 'one' ? '↻<sup style="font-size:10px;margin-left:-2px">1</sup>' : '↻';
   repeatBtn.classList.toggle('active', playMode !== 'off');
 }
 
