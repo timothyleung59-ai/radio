@@ -112,6 +112,7 @@ export function initCoverFlip() {
   container.addEventListener('click', () => {
     flipped = !flipped;
     flipper.classList.toggle('flipped', flipped);
+    container.classList.toggle('flipped', flipped);
   });
 }
 

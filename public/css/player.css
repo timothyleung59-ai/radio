@@ -76,13 +76,21 @@
   transition: width 0.3s linear;
 }
 .cover-container {
-  width: 100%;
-  max-width: 220px;
+  width: 220px;
   aspect-ratio: 1;
   margin: 0 auto 12px;
   flex-shrink: 1;
   perspective: 1000px;
   cursor: pointer;
+  transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1),
+              aspect-ratio 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.cover-container.flipped {
+  width: 100%;
+  aspect-ratio: auto;
+  flex: 1;
+  min-height: 0;
 }
 
 .cover-flipper {
