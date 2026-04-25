@@ -5,6 +5,7 @@ import { updateLyrics } from './lyrics.js';
 import { loadChatHistory } from './chat.js';
 import { server } from './api.js';
 import './panels.js';
+import './voice.js';
 
 console.log('Claudio FM 启动中...');
 
@@ -35,8 +36,11 @@ topbarMenu?.querySelectorAll('.topbar-menu-item').forEach(btn => {
     const action = btn.dataset.action;
 
     if (action === 'voice') {
-      document.getElementById('voiceOverlay').style.display = 'flex';
-      window.dispatchEvent(new Event('voiceStart'));
+      const song = window.player?.getCurrentSong?.();
+      const text = song
+        ? `现在为你播放的是${song.artist}的${song.name}，好好享受这首歌吧。`
+        : '欢迎来到 Claudio FM，我是你的 AI DJ。点一首歌开始你的音乐之旅吧。';
+      window.voice?.speak(text);
     }
 
     if (action === 'daily') {
