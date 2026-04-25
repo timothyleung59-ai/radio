@@ -239,11 +239,22 @@ app.post('/api/config/:filename', (req, res) => {
 
 // ========== 网易云 API 代理（避免浏览器 CORS） ==========
 const NETEASE_API = process.env.NETEASE_API || 'http://192.168.5.103:3000';
+const NETEASE_COOKIE = process.env.NETEASE_COOKIE || '';
+
+// 构建带 cookie 的请求 URL
+function neteaseUrl(path, params = {}) {
+  const url = new URL(path, NETEASE_API);
+  for (const [k, v] of Object.entries(params)) {
+    url.searchParams.set(k, v);
+  }
+  if (NETEASE_COOKIE) url.searchParams.set('cookie', NETEASE_COOKIE);
+  return url.toString();
+}
 
 app.get('/api/netease/search', async (req, res) => {
   try {
     const { keywords, limit = 20 } = req.query;
-    const r = await fetch(`${NETEASE_API}/cloudsearch?keywords=${encodeURIComponent(keywords)}&type=1&limit=${limit}`);
+    const r = await fetch(neteaseUrl('/cloudsearch', { keywords, type: 1, limit }));
     const data = await r.json();
     res.json(data);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -252,7 +263,7 @@ app.get('/api/netease/search', async (req, res) => {
 app.get('/api/netease/song/url', async (req, res) => {
   try {
     const { id, br = 320000 } = req.query;
-    const r = await fetch(`${NETEASE_API}/song/url?id=${id}&br=${br}`);
+    const r = await fetch(neteaseUrl('/song/url', { id, br }));
     const data = await r.json();
     res.json(data);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -260,7 +271,7 @@ app.get('/api/netease/song/url', async (req, res) => {
 
 app.get('/api/netease/lyric', async (req, res) => {
   try {
-    const r = await fetch(`${NETEASE_API}/lyric?id=${req.query.id}`);
+    const r = await fetch(neteaseUrl('/lyric', { id: req.query.id }));
     const data = await r.json();
     res.json(data);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -268,7 +279,7 @@ app.get('/api/netease/lyric', async (req, res) => {
 
 app.get('/api/netease/personalized', async (req, res) => {
   try {
-    const r = await fetch(`${NETEASE_API}/personalized?limit=${req.query.limit || 10}`);
+    const r = await fetch(neteaseUrl('/personalized', { limit: req.query.limit || 10 }));
     const data = await r.json();
     res.json(data);
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -276,7 +287,7 @@ app.get('/api/netease/personalized', async (req, res) => {
 
 app.get('/api/netease/playlist/detail', async (req, res) => {
   try {
-    const r = await fetch(`${NETEASE_API}/playlist/detail?id=${req.query.id}`);
+    const r = await fetch(neteaseUrl('/playlist/detail', { id: req.query.id }));
     const data = await r.json();
     res.json(data);
   } catch (e) { res.status(500).json({ error: e.message }); }
