@@ -235,11 +235,17 @@ function toggleShuffle() {
   window.showToast(playMode === 'shuffle' ? '随机播放已开启' : '随机播放已关闭');
 }
 
+function updateRepeatIcon() {
+  const icons = { off: '↻', all: '↻', one: '🔂' };
+  repeatBtn.textContent = icons[playMode];
+  repeatBtn.classList.toggle('active', playMode !== 'off');
+}
+
 function toggleRepeat() {
   const modes = ['off', 'all', 'one'];
   const idx = (modes.indexOf(playMode) + 1) % modes.length;
   playMode = modes[idx];
-  repeatBtn.classList.toggle('active', playMode !== 'off');
+  updateRepeatIcon();
   const labels = { off: '关闭循环', all: '列表循环', one: '单曲循环' };
   window.showToast(labels[playMode]);
   audio.loop = playMode === 'one';
@@ -347,7 +353,7 @@ export async function restorePlayback() {
 
   playMode = state.play_mode || 'off';
   shuffleBtn.classList.toggle('active', playMode === 'shuffle');
-  repeatBtn.classList.toggle('active', playMode !== 'off');
+  updateRepeatIcon();
 
   currentSong = {
     id: state.current_song_id,
