@@ -114,10 +114,12 @@ export async function playSong(song) {
 export function setQueue(songs, startIndex = 0) {
   queue = songs;
   queueIndex = startIndex;
+  savePlaybackState();
 }
 
 export function addToQueue(songs) {
   queue.push(...songs);
+  savePlaybackState();
 }
 
 export function playNext() {
@@ -198,18 +200,22 @@ function seekFromEvent(e) {
   audio.currentTime = p * (audio.duration || 0);
 }
 
+let saveTimer = null;
 async function savePlaybackState() {
-  await server.put('/api/playback-state', {
-    current_song_id: currentSong?.id || null,
-    current_song_name: currentSong?.name || null,
-    current_song_artist: currentSong?.artist || null,
-    current_song_album: currentSong?.album || null,
-    current_song_cover: currentSong?.cover || null,
-    progress_seconds: audio.currentTime || 0,
-    queue_song_ids: queue.map(s => s.id),
-    queue_index: queueIndex,
-    play_mode: playMode
-  });
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    await server.put('/api/playback-state', {
+      current_song_id: currentSong?.id || null,
+      current_song_name: currentSong?.name || null,
+      current_song_artist: currentSong?.artist || null,
+      current_song_album: currentSong?.album || null,
+      current_song_cover: currentSong?.cover || null,
+      progress_seconds: audio.currentTime || 0,
+      queue_song_ids: queue, // 保存完整歌曲对象
+      queue_index: queueIndex,
+      play_mode: playMode
+    });
+  }, 500); // 防抖 500ms
 }
 
 // 事件绑定
@@ -272,14 +278,30 @@ export async function restorePlayback() {
   shuffleBtn.classList.toggle('active', playMode === 'shuffle');
   repeatBtn.classList.toggle('active', playMode !== 'off');
 
+  currentSong = {
+    id: state.current_song_id,
+    name: state.current_song_name,
+    artist: state.current_song_artist,
+    album: state.current_song_album,
+    cover: state.current_song_cover
+  };
+
   songTitle.textContent = `${state.current_song_name} — ${state.current_song_artist}`;
   if (state.current_song_cover) coverImg.src = state.current_song_cover;
 
-  // 预加载队列
+  // 恢复完整队列
   if (state.queue_song_ids) {
     try {
-      const ids = JSON.parse(state.queue_song_ids);
-      // 队列中的歌曲信息从历史/收藏恢复（简化处理：仅恢复当前歌曲）
+      const parsed = JSON.parse(state.queue_song_ids);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        // 兼容：如果是字符串数组（旧格式），只恢复ID
+        if (typeof parsed[0] === 'string') {
+          queue = parsed.map(id => ({ id, name: '', artist: '', album: '', cover: '' }));
+        } else {
+          queue = parsed;
+        }
+        queueIndex = state.queue_index || 0;
+      }
     } catch(e) {}
   }
 }
