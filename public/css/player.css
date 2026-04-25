@@ -77,11 +77,12 @@
 }
 .cover-container {
   width: 100%;
-  flex: 1;
-  min-height: 0;
+  max-width: 300px;
+  aspect-ratio: 1;
+  margin: 0 auto 12px;
+  flex-shrink: 1;
   perspective: 1000px;
   cursor: pointer;
-  margin-bottom: 12px;
 }
 
 .cover-flipper {
