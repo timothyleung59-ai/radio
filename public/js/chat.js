@@ -1,5 +1,5 @@
 // public/js/chat.js
-import { server } from './api.js';
+import { server, netease } from './api.js';
 import { burstParticles } from './visual.js';
 
 const $ = id => document.getElementById(id);
@@ -104,9 +104,25 @@ async function sendMessage() {
               const { say, reason, play, segue } = data.parsed;
               let html = '';
               if (say || reason) html += `<div>${[say, reason].filter(Boolean).join('\n\n')}</div>`;
-              if (segue) html += renderVoiceMsg(segue);
+
+              // AI推荐的歌曲需要通过网易云搜索获取真实数据
+              let resolvedSongs = [];
               if (play && play.length > 0) {
-                html += play.map(s => renderSongCard(s)).join('');
+                resolvedSongs = await Promise.all(play.map(async (s) => {
+                  try {
+                    const keyword = `${s.name} ${s.artist}`.trim();
+                    const results = await netease.search(keyword, 3);
+                    // 找最匹配的（优先同名）
+                    const match = results.find(r => r.name === s.name) || results[0];
+                    if (match) return { ...match, aiReason: s.reason || '' };
+                    return s; // fallback: 用AI给的数据
+                  } catch { return s; }
+                }));
+              }
+
+              if (segue) html += renderVoiceMsg(segue);
+              if (resolvedSongs.length > 0) {
+                html += resolvedSongs.map(s => renderSongCard(s)).join('');
               }
               if (assistantMsg) {
                 assistantMsg.querySelector('.msg-bubble').innerHTML = html;
@@ -153,7 +169,6 @@ function handleCommand(data) {
 async function handleMusicSearch(keyword) {
   addMessage('assistant', `正在搜索"${keyword}"...`);
   try {
-    const { netease } = await import('./api.js');
     const songs = await netease.search(keyword, 5);
     if (songs.length === 0) {
       addMessage('assistant', '没找到相关歌曲');
