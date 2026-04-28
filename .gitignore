@@ -5,3 +5,5 @@ data/
 .DS_Store
 certs/
 public/rootCA.pem
+.claude
+package-lock.json

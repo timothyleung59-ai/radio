@@ -467,7 +467,7 @@ app.post('/api/dispatch', async (req, res) => {
     const systemPrompt = buildSystemPrompt(currentSong, history);
 
     const stream = await anthropic.messages.stream({
-      model: 'mimo-v2.5-pro',
+      model: process.env.ANTHROPIC_MODEL,
       max_tokens: 4096,
       system: systemPrompt,
       messages
