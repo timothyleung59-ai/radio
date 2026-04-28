@@ -1,0 +1,96 @@
+<svg width="1280" height="640" viewBox="0 0 1280 640" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1280" y2="640" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0A0A10"/>
+      <stop offset="0.45" stop-color="#14142A"/>
+      <stop offset="1" stop-color="#0F1A2F"/>
+    </linearGradient>
+    <radialGradient id="glowA" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(278 174) rotate(42.34) scale(405 287)">
+      <stop stop-color="#7C5CFF" stop-opacity="0.75"/>
+      <stop offset="1" stop-color="#7C5CFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowB" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(948 476) rotate(170.693) scale(457 248)">
+      <stop stop-color="#35C3FF" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#35C3FF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#FFFFFF" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.05"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#8D6CFF"/>
+      <stop offset="1" stop-color="#34D3FF"/>
+    </linearGradient>
+    <filter id="blur" x="-120" y="-120" width="1520" height="880" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="40"/>
+    </filter>
+    <filter id="soft" x="0" y="0" width="1280" height="640" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="0.35"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="640" rx="28" fill="url(#bg)"/>
+
+  <g filter="url(#blur)">
+    <ellipse cx="278" cy="174" rx="320" ry="185" fill="url(#glowA)"/>
+    <ellipse cx="948" cy="476" rx="330" ry="190" fill="url(#glowB)"/>
+  </g>
+
+  <g opacity="0.18">
+    <path d="M87 520C232 438 359 422 547 470C720 514 834 520 1053 422" stroke="url(#accent)" stroke-width="2"/>
+    <path d="M104 557C270 478 437 468 592 504C777 547 916 540 1167 443" stroke="url(#accent)" stroke-opacity="0.55" stroke-width="2"/>
+  </g>
+
+  <rect x="72" y="72" width="1136" height="496" rx="26" fill="white" fill-opacity="0.03" stroke="white" stroke-opacity="0.08"/>
+
+  <g>
+    <rect x="118" y="118" width="408" height="408" rx="28" fill="url(#card)" stroke="rgba(255,255,255,0.12)"/>
+    <rect x="148" y="148" width="348" height="348" rx="24" fill="#111226" stroke="rgba(255,255,255,0.10)"/>
+    <circle cx="322" cy="322" r="118" fill="url(#accent)" fill-opacity="0.22"/>
+    <circle cx="322" cy="322" r="92" fill="#0F1124" stroke="rgba(255,255,255,0.18)"/>
+    <circle cx="322" cy="322" r="56" fill="url(#accent)" fill-opacity="0.78"/>
+    <circle cx="322" cy="322" r="14" fill="#FFFFFF" fill-opacity="0.9"/>
+
+    <g opacity="0.85">
+      <rect x="206" y="435" width="232" height="10" rx="5" fill="white" fill-opacity="0.12"/>
+      <rect x="206" y="435" width="148" height="10" rx="5" fill="url(#accent)"/>
+      <circle cx="362" cy="440" r="11" fill="#FFF"/>
+    </g>
+
+    <g opacity="0.72">
+      <rect x="192" y="214" width="14" height="120" rx="7" fill="#FFF" fill-opacity="0.08"/>
+      <rect x="216" y="186" width="14" height="176" rx="7" fill="#FFF" fill-opacity="0.15"/>
+      <rect x="240" y="228" width="14" height="92" rx="7" fill="#FFF" fill-opacity="0.10"/>
+      <rect x="391" y="214" width="14" height="120" rx="7" fill="#FFF" fill-opacity="0.08"/>
+      <rect x="415" y="186" width="14" height="176" rx="7" fill="#FFF" fill-opacity="0.15"/>
+      <rect x="439" y="228" width="14" height="92" rx="7" fill="#FFF" fill-opacity="0.10"/>
+    </g>
+  </g>
+
+  <g>
+    <text x="592" y="188" fill="#FFFFFF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="64" font-weight="800">Claudio FM</text>
+    <text x="592" y="236" fill="#C8D1FF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="24" font-weight="500">Immersive AI Radio • Chat • Music • Mood • Playback</text>
+
+    <g>
+      <rect x="592" y="284" width="138" height="40" rx="20" fill="#FFFFFF" fill-opacity="0.08" stroke="#FFFFFF" stroke-opacity="0.12"/>
+      <text x="629" y="310" fill="#E9ECFF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="18" font-weight="600">AI DJ</text>
+
+      <rect x="744" y="284" width="176" height="40" rx="20" fill="#FFFFFF" fill-opacity="0.08" stroke="#FFFFFF" stroke-opacity="0.12"/>
+      <text x="782" y="310" fill="#E9ECFF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="18" font-weight="600">Smart Playback</text>
+
+      <rect x="934" y="284" width="138" height="40" rx="20" fill="#FFFFFF" fill-opacity="0.08" stroke="#FFFFFF" stroke-opacity="0.12"/>
+      <text x="967" y="310" fill="#E9ECFF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="18" font-weight="600">PWA</text>
+    </g>
+
+    <text x="592" y="382" fill="#F5F7FF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="30" font-weight="700">让 AI 像电台 DJ 一样陪你听歌</text>
+    <text x="592" y="422" fill="#B8C2EA" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="22" font-weight="500">聊天、推荐、续播、歌词、氛围视觉，全部收进一个页面。</text>
+
+    <g>
+      <rect x="592" y="468" width="228" height="54" rx="27" fill="url(#accent)"/>
+      <text x="645" y="503" fill="#07111F" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="22" font-weight="800">Anthropic-compatible</text>
+
+      <rect x="840" y="468" width="176" height="54" rx="27" fill="#FFFFFF" fill-opacity="0.06" stroke="#FFFFFF" stroke-opacity="0.12"/>
+      <text x="887" y="503" fill="#F3F6FF" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="22" font-weight="700">MiMo-V2.5-Pro</text>
+    </g>
+  </g>
+</svg>
