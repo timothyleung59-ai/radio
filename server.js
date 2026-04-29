@@ -435,56 +435,65 @@ app.put('/api/env-config', (req, res) => {
   res.json({ ok: true });
 });
 
-// ========== 字节火山引擎 TTS 代理 ==========
-// 文档: https://www.volcengine.com/docs/6561/79817
-// 客户端 POST /api/tts {text}, 返回 audio/mpeg 二进制
+// ========== 小米 MiMo-V2.5-TTS 代理 ==========
+// 文档: https://platform.xiaomimimo.com/docs/zh-CN/usage-guide/speech-synthesis-v2.5
+// 客户端 POST /api/tts {text, style?} → 返回音频二进制（默认 wav）
+//   - text:  待合成文本（放入 assistant 消息）
+//   - style: 可选风格指令（放入 user 消息，覆盖 MIMO_TTS_STYLE 默认值）
 app.post('/api/tts', async (req, res) => {
   const text = (req.body?.text || '').toString().trim();
   if (!text) return res.status(400).json({ error: 'text 不能为空' });
   if (text.length > 1024) return res.status(413).json({ error: 'text 过长（最多 1024 字符）' });
 
-  const appid = process.env.VOLC_APPID;
-  const token = process.env.VOLC_ACCESS_TOKEN;
-  const cluster = process.env.VOLC_CLUSTER || 'volcano_tts';
-  const voiceType = process.env.VOLC_VOICE_TYPE || 'BV001_streaming';
+  const apiKey  = process.env.MIMO_API_KEY;
+  const baseUrl = (process.env.MIMO_TTS_BASE_URL || 'https://api.xiaomimimo.com/v1').replace(/\/+$/, '');
+  const model   = process.env.MIMO_TTS_MODEL  || 'mimo-v2.5-tts';
+  const voice   = process.env.MIMO_TTS_VOICE  || 'mimo_default';
+  const format  = (process.env.MIMO_TTS_FORMAT || 'wav').toLowerCase(); // wav | pcm16
+  const defaultStyle = process.env.MIMO_TTS_STYLE || '';
+  const style = (req.body?.style ?? defaultStyle ?? '').toString().trim();
 
-  if (!appid || !token) {
-    return res.status(503).json({ error: 'TTS 未配置，请在 .env 设置 VOLC_APPID 和 VOLC_ACCESS_TOKEN' });
+  if (!apiKey) {
+    return res.status(503).json({ error: 'TTS 未配置，请在 .env 设置 MIMO_API_KEY' });
   }
 
+  // mimo-v2.5-tts 系列：目标文本必须放在 assistant.content；user.content 是可选的风格指令
+  const messages = [];
+  if (style) messages.push({ role: 'user', content: style });
+  messages.push({ role: 'assistant', content: text });
+
   try {
-    const reqid = require('crypto').randomUUID();
-    const r = await fetch('https://openspeech.bytedance.com/api/v1/tts', {
+    const r = await fetch(`${baseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        // 注意火山要求格式：Bearer; <token>（中间有分号+空格）
-        'Authorization': `Bearer;${token}`
+        'api-key': apiKey,
+        'Authorization': `Bearer ${apiKey}` // 文档支持任一种，给两个都加，兼容性最好
       },
       body: JSON.stringify({
-        app: { appid, token, cluster },
-        user: { uid: 'claudio_fm_user' },
-        audio: {
-          voice_type: voiceType,
-          encoding: 'mp3',
-          speed_ratio: parseFloat(process.env.VOLC_SPEED || '1.0'),
-          volume_ratio: parseFloat(process.env.VOLC_VOLUME || '1.0'),
-          pitch_ratio: parseFloat(process.env.VOLC_PITCH || '1.0')
-        },
-        request: {
-          reqid,
-          text,
-          operation: 'query'
-        }
+        model,
+        messages,
+        audio: { format: format === 'pcm16' ? 'pcm16' : 'wav', voice }
       })
     });
-    const data = await r.json();
-    if (data.code !== 3000 || !data.data) {
-      console.error('Volcano TTS 失败:', data);
-      return res.status(502).json({ error: data.message || 'TTS 服务返回错误', detail: data });
+
+    if (!r.ok) {
+      const errBody = await r.text().catch(() => '');
+      console.error('MiMo TTS HTTP', r.status, errBody);
+      return res.status(502).json({ error: `TTS 服务返回 ${r.status}`, detail: errBody });
     }
-    const buf = Buffer.from(data.data, 'base64');
-    res.set('Content-Type', 'audio/mpeg');
+
+    const data = await r.json();
+    const b64 = data?.choices?.[0]?.message?.audio?.data;
+    if (!b64) {
+      console.error('MiMo TTS 响应缺少 audio.data:', data);
+      return res.status(502).json({ error: 'TTS 服务未返回音频', detail: data });
+    }
+
+    const buf = Buffer.from(b64, 'base64');
+    // pcm16 是裸 PCM（24kHz / mono / s16le），浏览器无法直接播放——一般情况下用 wav
+    const contentType = format === 'pcm16' ? 'application/octet-stream' : 'audio/wav';
+    res.set('Content-Type', contentType);
     res.set('Content-Length', buf.length);
     res.set('Cache-Control', 'public, max-age=3600');
     res.send(buf);

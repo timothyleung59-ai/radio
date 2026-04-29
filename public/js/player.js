@@ -356,10 +356,19 @@ async function savePlaybackState() {
   }, 500); // 防抖 500ms
 }
 
+// 「下一首」：电台模式开着时让 AI 重新挑一首（带 DJ 串词）；否则走本地队列
+function handleNext() {
+  if (window.radio?.isOn?.()) {
+    window.radio.pickAndPlay();
+    return;
+  }
+  playNext();
+}
+
 // 事件绑定
 playBtn.addEventListener('click', togglePlay);
 prevBtn.addEventListener('click', playPrev);
-nextBtn.addEventListener('click', playNext);
+nextBtn.addEventListener('click', handleNext);
 shuffleBtn.addEventListener('click', toggleShuffle);
 repeatBtn.addEventListener('click', toggleRepeat);
 likeBtn.addEventListener('click', toggleLike);
@@ -451,7 +460,7 @@ miniPlayBtn?.addEventListener('click', (e) => {
 });
 miniNextBtn?.addEventListener('click', (e) => {
   e.stopPropagation();
-  playNext();
+  handleNext();
 });
 
 miniLikeBtn?.addEventListener('click', (e) => {
