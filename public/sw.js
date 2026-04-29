@@ -1,4 +1,4 @@
-const CACHE_NAME = 'claudio-fm-v1';
+const CACHE_NAME = 'claudio-fm-v7-radio-fix';
 const PRECACHE = [
   '/',
   '/css/main.css',
@@ -15,6 +15,7 @@ const PRECACHE = [
   '/js/api.js',
   '/js/config.js',
   '/js/panels.js',
+  '/js/radio.js',
   '/icon-192.svg',
   '/icon-512.svg'
 ];

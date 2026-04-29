@@ -67,7 +67,26 @@ function updateQueueCount() {
   const n = queue.length;
   queueCount.textContent = n;
   queueCount.dataset.count = n;
+  window.dispatchEvent(new CustomEvent('queuechange', { detail: { length: n, index: queueIndex } }));
 }
+
+export function playAt(idx) {
+  if (idx < 0 || idx >= queue.length) return;
+  queueIndex = idx;
+  playSong(queue[idx]);
+}
+
+export function removeAt(idx) {
+  if (idx < 0 || idx >= queue.length) return;
+  queue.splice(idx, 1);
+  if (queueIndex >= queue.length) queueIndex = Math.max(0, queue.length - 1);
+  else if (idx < queueIndex) queueIndex--;
+  updateQueueCount();
+  savePlaybackState();
+}
+
+export function getQueue() { return queue.slice(); }
+export function getQueueIndex() { return queueIndex; }
 
 function renderQueuePanel() {
   queuePanelCount.textContent = `(${queue.length}首)`;
@@ -132,6 +151,7 @@ function formatTime(s) {
 
 function updatePlayButton() {
   playBtn.textContent = audio.paused ? '▶' : '⏸';
+  if (miniPlayBtn) miniPlayBtn.textContent = audio.paused ? '▶' : '⏸';
 }
 
 function updateProgress() {
@@ -195,21 +215,21 @@ export async function playSong(song) {
   audio.src = url;
   audio.play().catch(() => {});
 
-  songTitle.textContent = `${song.name} — ${song.artist}`;
+  songTitle.textContent = song.name || '未在播放';
   coverImg.src = song.cover || coverImg.src;
 
   updatePlayButton();
   checkLiked();
   syncMiniPlayer();
-  setPlayerCollapsed(true);
 
-  // 记录播放历史
+  // 记录播放历史（带当前电台模式，用于 AI 学习）
   server.post('/api/history', {
     song_id: song.id,
     song_name: song.name,
     artist: song.artist,
     album: song.album || '',
-    cover_url: song.cover || ''
+    cover_url: song.cover || '',
+    mode: window.getCurrentRadioMode?.() || null
   });
 
   // 保存播放状态
@@ -439,12 +459,12 @@ miniLikeBtn?.addEventListener('click', (e) => {
   toggleLike();
 });
 
-// 同步迷你播放器状态
+// 同步底部播放栏的封面 + 副标题（艺术家）
 function syncMiniPlayer() {
   if (!currentSong) return;
-  miniCover.src = currentSong.cover || miniCover.src;
-  miniTitle.textContent = `${currentSong.name} — ${currentSong.artist}`;
-  miniPlayBtn.textContent = audio.paused ? '▶' : '⏸';
+  if (miniCover) miniCover.src = currentSong.cover || miniCover.src;
+  if (miniTitle) miniTitle.textContent = currentSong.artist || '—';
+  if (miniPlayBtn) miniPlayBtn.textContent = audio.paused ? '▶' : '⏸';
 }
 
 function syncMiniProgress() {
@@ -469,7 +489,9 @@ export async function restorePlayback() {
     cover: state.current_song_cover
   };
 
-  songTitle.textContent = `${state.current_song_name} — ${state.current_song_artist}`;
+  songTitle.textContent = state.current_song_name || '未在播放';
+  if (miniTitle) miniTitle.textContent = state.current_song_artist || '—';
+  if (miniCover && state.current_song_cover) miniCover.src = state.current_song_cover;
   if (state.current_song_cover) coverImg.src = state.current_song_cover;
 
   // 恢复完整队列
@@ -491,6 +513,6 @@ export async function restorePlayback() {
 }
 
 // 导出给全局使用
-window.player = { playSong, setQueue, addToQueue, playNext, playPrev, getCurrentSong: () => currentSong };
+window.player = { playSong, setQueue, addToQueue, playNext, playPrev, playAt, removeAt, getQueue, getQueueIndex, getCurrentSong: () => currentSong };
 
 export function getAudioElement() { return audio; }

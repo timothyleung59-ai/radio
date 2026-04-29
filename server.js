@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ override: true });
 const express = require('express');
 const path = require('path');
 const cors = require('cors');
@@ -133,10 +133,13 @@ app.get('/api/history', (req, res) => {
   res.json(rows);
 });
 
+// 兼容旧表：尝试加 mode 列（已存在则忽略）
+try { db.exec('ALTER TABLE play_history ADD COLUMN mode TEXT'); } catch {}
+
 app.post('/api/history', (req, res) => {
-  const { song_id, song_name, artist, album, cover_url } = req.body;
-  db.prepare('INSERT INTO play_history (song_id, song_name, artist, album, cover_url) VALUES (?, ?, ?, ?, ?)')
-    .run(song_id, song_name, artist, album, cover_url);
+  const { song_id, song_name, artist, album, cover_url, mode } = req.body;
+  db.prepare('INSERT INTO play_history (song_id, song_name, artist, album, cover_url, mode) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(song_id, song_name, artist, album, cover_url, mode || null);
   res.json({ ok: true });
 });
 
@@ -237,6 +240,166 @@ app.post('/api/config/:filename', (req, res) => {
   res.json({ ok: true });
 });
 
+// ========== 电台模式 MD 文件系统 ==========
+// 每个模式一个 MD，用户可在 UI 编辑；AI 会作为 prompt context；后台 cron 自动追加学习
+const modesDir = path.join(configDir, 'modes');
+if (!fs.existsSync(modesDir)) fs.mkdirSync(modesDir, { recursive: true });
+
+const MODE_MD_DEFAULTS = {
+  default: `# 默认模式（习惯学习）
+
+## 用户偏好（手动编辑）
+- 我倾向于：
+- 不太喜欢：
+
+## 听歌场景习惯
+- 工作日早晨：
+- 工作日下午：
+- 工作日晚间：
+- 周末白天：
+- 周末晚上：
+
+<!-- AI 学习区（AI 自动追加，不要手动改）-->
+<!-- AUTO-LEARN-START -->
+（暂无学习数据）
+<!-- AUTO-LEARN-END -->
+`,
+  work: `# 工作模式
+
+## 我希望工作时听到
+- 风格倾向：lo-fi / 氛围电子 / 纯器乐 / 爵士钢琴
+- 节奏偏好：BPM 70-110，平稳
+- 避开：高情绪人声、说唱、躁动节拍
+
+## 我喜欢的工作背景音艺术家
+- Nujabes
+- Tycho
+- 桑田佳祐（instrumental）
+- （在这里加你自己的）
+
+## 我不喜欢工作时听的
+-
+
+<!-- AUTO-LEARN-START -->
+（暂无学习数据）
+<!-- AUTO-LEARN-END -->
+`,
+  workout: `# 运动模式
+
+## 我希望运动时听到
+- 风格倾向：EDM / 嘻哈 / 摇滚 / Future Bass
+- 节奏偏好：BPM 120-160，鼓点厚重
+- 副歌带感、激励性强
+
+## 我喜欢的运动歌单艺术家
+- Imagine Dragons
+- Eminem
+- Calvin Harris
+-
+
+## 我不喜欢运动时听的
+-
+
+<!-- AUTO-LEARN-START -->
+（暂无学习数据）
+<!-- AUTO-LEARN-END -->
+`,
+  drive: `# 驾驶模式
+
+## 我希望驾驶时听到
+- 风格倾向：经典摇滚 / City Pop / 80s synthwave / 副歌跟唱型 Anthem
+- 中速节奏，主旋律突出
+
+## 我喜欢的开车歌单艺术家
+- 五月天
+- Coldplay
+- Bon Jovi
+-
+
+## 我不喜欢开车时听的
+-
+
+<!-- AUTO-LEARN-START -->
+（暂无学习数据）
+<!-- AUTO-LEARN-END -->
+`,
+  relax: `# 休息模式
+
+## 我希望休息时听到
+- 风格倾向：indie folk / bossa nova / city pop 慢拍 / 轻爵士
+- BPM 60-95，柔和
+
+## 我喜欢的放松艺术家
+- 陈绮贞
+- 蔡健雅
+- Norah Jones
+-
+
+## 我不喜欢休息时听的
+-
+
+<!-- AUTO-LEARN-START -->
+（暂无学习数据）
+<!-- AUTO-LEARN-END -->
+`,
+  sleep: `# 睡前模式
+
+## 我希望睡前听到
+- 风格倾向：Ambient / newage / 古典钢琴 / 白噪音流
+- BPM ≤ 70，结构平稳，无刺激高频
+
+## 我喜欢的助眠艺术家
+- Yiruma
+- 久石让
+- Ludovico Einaudi
+-
+
+## 我不喜欢睡前听的
+- 强人声、节奏剧烈
+
+<!-- AUTO-LEARN-START -->
+（暂无学习数据）
+<!-- AUTO-LEARN-END -->
+`
+};
+
+const ALLOWED_MODE_KEYS = Object.keys(MODE_MD_DEFAULTS);
+
+function modeFile(key) {
+  return path.join(modesDir, `${key}.md`);
+}
+
+function ensureModeMd(key) {
+  const fp = modeFile(key);
+  if (!fs.existsSync(fp)) {
+    fs.writeFileSync(fp, MODE_MD_DEFAULTS[key] || `# ${key}\n`, 'utf-8');
+  }
+  return fp;
+}
+
+function readModeMd(key) {
+  const fp = ensureModeMd(key);
+  return fs.readFileSync(fp, 'utf-8');
+}
+
+// 启动时确保所有模式 MD 都存在
+ALLOWED_MODE_KEYS.forEach(ensureModeMd);
+
+app.get('/api/radio/modes/:key/md', (req, res) => {
+  const key = req.params.key;
+  if (!ALLOWED_MODE_KEYS.includes(key)) return res.status(400).json({ error: '未知模式' });
+  res.json({ key, content: readModeMd(key) });
+});
+
+app.put('/api/radio/modes/:key/md', (req, res) => {
+  const key = req.params.key;
+  if (!ALLOWED_MODE_KEYS.includes(key)) return res.status(400).json({ error: '未知模式' });
+  const content = req.body?.content;
+  if (typeof content !== 'string') return res.status(400).json({ error: 'content 必须是字符串' });
+  fs.writeFileSync(modeFile(key), content, 'utf-8');
+  res.json({ ok: true });
+});
+
 // ========== 环境变量配置 API ==========
 const envPath = path.join(__dirname, '.env');
 const MASK = '***已设置***';
@@ -270,6 +433,65 @@ app.put('/api/env-config', (req, res) => {
 
   fs.writeFileSync(envPath, envContent);
   res.json({ ok: true });
+});
+
+// ========== 字节火山引擎 TTS 代理 ==========
+// 文档: https://www.volcengine.com/docs/6561/79817
+// 客户端 POST /api/tts {text}, 返回 audio/mpeg 二进制
+app.post('/api/tts', async (req, res) => {
+  const text = (req.body?.text || '').toString().trim();
+  if (!text) return res.status(400).json({ error: 'text 不能为空' });
+  if (text.length > 1024) return res.status(413).json({ error: 'text 过长（最多 1024 字符）' });
+
+  const appid = process.env.VOLC_APPID;
+  const token = process.env.VOLC_ACCESS_TOKEN;
+  const cluster = process.env.VOLC_CLUSTER || 'volcano_tts';
+  const voiceType = process.env.VOLC_VOICE_TYPE || 'BV001_streaming';
+
+  if (!appid || !token) {
+    return res.status(503).json({ error: 'TTS 未配置，请在 .env 设置 VOLC_APPID 和 VOLC_ACCESS_TOKEN' });
+  }
+
+  try {
+    const reqid = require('crypto').randomUUID();
+    const r = await fetch('https://openspeech.bytedance.com/api/v1/tts', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        // 注意火山要求格式：Bearer; <token>（中间有分号+空格）
+        'Authorization': `Bearer;${token}`
+      },
+      body: JSON.stringify({
+        app: { appid, token, cluster },
+        user: { uid: 'claudio_fm_user' },
+        audio: {
+          voice_type: voiceType,
+          encoding: 'mp3',
+          speed_ratio: parseFloat(process.env.VOLC_SPEED || '1.0'),
+          volume_ratio: parseFloat(process.env.VOLC_VOLUME || '1.0'),
+          pitch_ratio: parseFloat(process.env.VOLC_PITCH || '1.0')
+        },
+        request: {
+          reqid,
+          text,
+          operation: 'query'
+        }
+      })
+    });
+    const data = await r.json();
+    if (data.code !== 3000 || !data.data) {
+      console.error('Volcano TTS 失败:', data);
+      return res.status(502).json({ error: data.message || 'TTS 服务返回错误', detail: data });
+    }
+    const buf = Buffer.from(data.data, 'base64');
+    res.set('Content-Type', 'audio/mpeg');
+    res.set('Content-Length', buf.length);
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.send(buf);
+  } catch (e) {
+    console.error('TTS 调用异常:', e);
+    res.status(500).json({ error: 'TTS 调用异常: ' + e.message });
+  }
 });
 
 // ========== 网易云 API 代理（避免浏览器 CORS） ==========
@@ -340,6 +562,263 @@ app.get('/api/netease/playlist/detail', async (req, res) => {
     const r = await fetch(neteaseUrl('/playlist/detail', { id: req.query.id }));
     const data = await r.json();
     res.json(data);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 当前登录用户信息（用 .env 里的 NETEASE_COOKIE 鉴权）
+app.get('/api/netease/login-status', async (req, res) => {
+  try {
+    if (!NETEASE_COOKIE) return res.json({ logged_in: false });
+    const r = await fetch(neteaseUrl('/login/status'));
+    const data = await r.json();
+    const profile = data.data?.profile;
+    if (!profile) return res.json({ logged_in: false });
+    res.json({
+      logged_in: true,
+      user_id: profile.userId,
+      nickname: profile.nickname,
+      avatar: profile.avatarUrl,
+      vip_type: data.data?.account?.vipType || 0
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ========== AI 电台：基于上下文持续推下一首 ==========
+
+// 模式 → 选歌风格 + DJ 说话风格
+const RADIO_MODES = {
+  default: {
+    label: '默认（习惯学习）',
+    style: '根据下方"听歌习惯"切片自然延续，匹配用户当前时段品味。',
+    patterTone: '像私人电台老朋友：自然、慵懒、有温度，可以提到时段（"这个晚上"）和心情；语速适中。'
+  },
+  work: {
+    label: '工作模式',
+    style: '专注/沉浸：lo-fi、轻氛围电子、纯器乐、爵士钢琴、neo-soul instrumental。避开高情绪人声、说唱、躁动节拍。BPM 70-110。',
+    patterTone: '低声专业、克制：像深夜书房电台 DJ，几乎是耳语，不打断思路；句子简短，不煽情；多用专注/聚焦/节奏类词。'
+  },
+  workout: {
+    label: '运动模式',
+    style: '高能量爆发：EDM、嘻哈、摇滚、Future Bass、电子 K-Pop。BPM 120-160，鼓点厚重，副歌带感。',
+    patterTone: '热血高能、嗨喊：像健身房教练 + 体育解说混合体，激励性强，"准备好了吗""加大马力"，多用感叹号语气；语速偏快。'
+  },
+  drive: {
+    label: '驾驶模式',
+    style: '公路片质感：经典摇滚、流行 Rock、City Pop、80s synthwave、副歌容易跟唱的 Anthem。中速节奏，主旋律突出。',
+    patterTone: '老派 FM 公路电台：松弛、稳健、有点磁性，可以提到风、夜路、引擎；像 90s 香港夜场 DJ。'
+  },
+  relax: {
+    label: '休息模式',
+    style: '放松治愈：indie folk、bossa nova、citypop 慢拍、轻爵士、温柔人声。BPM 60-95，柔和不刺激。',
+    patterTone: '温柔治愈、轻松随意：像周末午后咖啡馆电台主持，语速慢，常提到放松、午后、阳光、咖啡。'
+  },
+  sleep: {
+    label: '睡前模式',
+    style: 'Ambient、newage、古典钢琴、白噪音流、轻柔大提琴、睡眠音乐。BPM ≤ 70，无刺激高频，结构平稳。',
+    patterTone: '极轻柔耳语：像 ASMR 主播，句子非常短，多用"放松""沉入""闭上眼"，语气几乎贴近呼吸；不能激动。串场词控制在 25 字以内。'
+  }
+};
+
+// 时段判断
+function getTimeBucket(d = new Date()) {
+  const h = d.getHours();
+  if (h >= 6 && h < 10) return '早晨';
+  if (h >= 10 && h < 12) return '上午';
+  if (h >= 12 && h < 14) return '午餐时间';
+  if (h >= 14 && h < 18) return '下午';
+  if (h >= 18 && h < 20) return '晚饭时间';
+  if (h >= 20 && h < 23) return '晚间';
+  return '深夜';
+}
+function isWorkday(d = new Date()) {
+  // 简化：周一到周五算工作日（不考虑节假日）
+  const day = d.getDay();
+  return day >= 1 && day <= 5;
+}
+
+// 拉同时段听歌习惯切片：返回最常听的歌/艺术家
+function buildHabitSnapshot() {
+  const now = new Date();
+  const bucket = getTimeBucket(now);
+  const workday = isWorkday(now);
+
+  // 拉所有历史，client 端筛同时段（SQLite 没好的方式直接 group by hour）
+  const all = db.prepare("SELECT song_name, artist, played_at FROM play_history ORDER BY id DESC LIMIT 1000").all();
+  const sameBucket = [];
+  const sameBucketSameDay = [];
+  for (const r of all) {
+    if (!r.played_at) continue;
+    const d = new Date(r.played_at.endsWith('Z') ? r.played_at : r.played_at + 'Z');
+    const b = getTimeBucket(d);
+    const w = isWorkday(d);
+    if (b === bucket) {
+      sameBucket.push(r);
+      if (w === workday) sameBucketSameDay.push(r);
+    }
+  }
+
+  // 优先按"同日类型 + 同时段"，不够再放宽到"任意日 + 同时段"
+  const pool = sameBucketSameDay.length >= 5 ? sameBucketSameDay : sameBucket;
+
+  // 按艺术家计数 top 5
+  const artistCount = {};
+  for (const r of pool) {
+    artistCount[r.artist] = (artistCount[r.artist] || 0) + 1;
+  }
+  const topArtists = Object.entries(artistCount).sort((a, b) => b[1] - a[1]).slice(0, 5).map(e => e[0]);
+
+  return {
+    timeBucket: bucket,
+    weekdayType: workday ? '工作日' : '休息日',
+    sample: pool.slice(0, 8).map(r => `《${r.song_name}》${r.artist}`),
+    topArtists,
+    sampleSize: pool.length
+  };
+}
+
+app.get('/api/radio/habit-snapshot', (req, res) => {
+  res.json(buildHabitSnapshot());
+});
+
+app.get('/api/radio/modes', (req, res) => {
+  res.json(Object.entries(RADIO_MODES).map(([key, m]) => ({ key, label: m.label })));
+});
+
+app.post('/api/radio/next', async (req, res) => {
+  try {
+    const recentPlayed = req.body?.recent || [];
+    const currentSong = req.body?.currentSong || null;
+    const seedTags = (req.body?.tags || []).slice(0, 5);
+    const modeKey = req.body?.mode && RADIO_MODES[req.body.mode] ? req.body.mode : 'default';
+    const mode = RADIO_MODES[modeKey];
+
+    // 从聊天历史拉最近 6 条做上下文
+    const recentChat = db.prepare('SELECT role, content FROM chat_messages ORDER BY id DESC LIMIT 6').all().reverse();
+    // 从喜欢的歌（本地）拉一些样本
+    const localFavs = db.prepare('SELECT song_name, artist FROM favorites ORDER BY RANDOM() LIMIT 8').all();
+    // 当前心情
+    const moodRow = db.prepare('SELECT value FROM preferences WHERE key = ?').get('current_mood');
+    let curMood = null; try { curMood = JSON.parse(moodRow?.value || 'null'); } catch {}
+
+    // 习惯切片（默认模式重点用，其他模式作辅助）
+    const habit = buildHabitSnapshot();
+
+    const ctx = [];
+    ctx.push(`【当前模式】${mode.label}`);
+    ctx.push(`【选歌风格】${mode.style}`);
+    ctx.push(`【DJ 说话语调】${mode.patterTone}`);
+    ctx.push(`【现在时间】${habit.weekdayType} · ${habit.timeBucket}`);
+    if (currentSong) ctx.push(`【当前播放】《${currentSong.name}》— ${currentSong.artist}`);
+    if (recentPlayed.length) ctx.push(`【刚听过的（不要重复）】${recentPlayed.slice(0, 6).map(s => `《${s.name}》${s.artist}`).join('; ')}`);
+
+    if (modeKey === 'default') {
+      if (habit.sample.length > 0) {
+        ctx.push(`【你这个时段（${habit.weekdayType} ${habit.timeBucket}）的听歌习惯】基于 ${habit.sampleSize} 条历史:\n${habit.sample.join('; ')}\n常听艺术家: ${habit.topArtists.join('、') || '无'}`);
+      } else {
+        ctx.push(`【提示】这个时段还没足够的听歌历史，先按"喜欢的歌曲"风格推荐，逐步学习。`);
+      }
+    }
+
+    // 模式专属偏好 MD（用户编辑 + AI 自动学习）
+    try {
+      const modeMd = readModeMd(modeKey);
+      if (modeMd?.trim()) ctx.push(`【模式偏好（来自 modes/${modeKey}.md）】\n${modeMd}`);
+    } catch {}
+
+    if (localFavs.length) ctx.push(`【喜欢歌曲样本】${localFavs.map(s => `《${s.song_name}》${s.artist}`).join('; ')}`);
+    if (seedTags.length) ctx.push(`【种子标签】${seedTags.join('、')}`);
+    if (curMood?.mood) ctx.push(`【当前电台情绪】${curMood.mood} (${curMood.genre || ''})`);
+    if (recentChat.length) ctx.push(`【最近聊天】\n${recentChat.map(c => `${c.role === 'user' ? '听众' : 'DJ'}: ${c.content.slice(0, 80)}`).join('\n')}`);
+    if (configCache.taste) ctx.push(`【长期品味】\n${configCache.taste}`);
+
+    const sysPrompt = `你是 Claudio FM 的 AI 电台 DJ。基于下方上下文为听众挑选下一首歌，并给一段串场词。
+
+【硬规则 - 必须遵守】
+- 严格输出 JSON，不要任何解释/markdown 包裹
+- 只挑 1 首歌
+- 不能与"刚听过的"重复
+- 选歌必须严格符合【选歌风格】定义的风格基调
+- 串场词必须严格符合【DJ 说话语调】的语气、风格、用词
+- 串场词要像电台主持人在话筒前真说话，不是写稿；不要书面语
+- 优先选用网易云上能找到的歌
+
+【输出 schema】
+{"song":{"name":"歌名","artist":"歌手"},"reason":"为何选这首（一句话内）","intro":"DJ 串场词（30-60字，严格按 DJ 说话语调写）"}`;
+
+    const userPrompt = ctx.join('\n\n');
+
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });
+    const response = await anthropic.messages.create({
+      model: process.env.ANTHROPIC_MODEL,
+      max_tokens: 2048,
+      system: sysPrompt,
+      messages: [{ role: 'user', content: userPrompt }]
+    });
+    // 兼容多种 SDK 返回：Claude 标准、DeepSeek-Anthropic、reasoning blocks
+    const blocks = response.content || [];
+    let text = blocks.filter(b => b.type === 'text').map(b => b.text || '').join('').trim();
+    if (!text) {
+      // 兜底：拼接所有有 text 字段的 block
+      text = blocks.map(b => b.text || b.input || '').filter(Boolean).join('').trim();
+    }
+    let parsed = null;
+    try { parsed = JSON.parse(text); } catch {
+      const m = text.match(/\{[\s\S]*\}/);
+      if (m) try { parsed = JSON.parse(m[0]); } catch {}
+    }
+    if (!parsed?.song?.name) {
+      console.warn('radio/next: AI 返回无法解析。raw blocks:', JSON.stringify(blocks).slice(0, 500));
+      return res.status(502).json({ error: 'AI 返回格式异常', raw: text.slice(0, 300), blocks: blocks.length });
+    }
+
+    // 网易云搜索补全真实数据
+    const resolved = await resolveSong(parsed.song);
+    if (!resolved?.id) return res.status(404).json({ error: '网易云未找到这首歌', song: parsed.song });
+
+    res.json({
+      song: { id: resolved.id, name: resolved.name, artist: resolved.artist, album: resolved.album, cover: resolved.cover },
+      reason: parsed.reason || '',
+      intro: parsed.intro || `下面为你播放${resolved.artist}的《${resolved.name}》，请欣赏。`
+    });
+  } catch (e) {
+    console.error('radio/next 失败:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 我喜欢的音乐（自动从用户第一个歌单拉取，最多 300 首）
+app.get('/api/netease/me/likes', async (req, res) => {
+  try {
+    if (!NETEASE_COOKIE) return res.status(401).json({ error: '未配置 NETEASE_COOKIE' });
+    const limit = Math.min(parseInt(req.query.limit) || 300, 1000);
+
+    // 1) 拿 uid
+    const stat = await fetch(neteaseUrl('/login/status')).then(r => r.json());
+    const uid = stat.data?.profile?.userId;
+    if (!uid) return res.status(401).json({ error: 'Cookie 无效或已过期' });
+
+    // 2) 拿用户的歌单列表，第一个总是「我喜欢的音乐」
+    const playlists = await fetch(neteaseUrl('/user/playlist', { uid, limit: 1 })).then(r => r.json());
+    const myLike = playlists.playlist?.[0];
+    if (!myLike) return res.status(404).json({ error: '未找到「我喜欢的音乐」歌单' });
+
+    // 3) 拉这个歌单的全部 track
+    const detail = await fetch(neteaseUrl('/playlist/track/all', { id: myLike.id, limit, offset: 0 })).then(r => r.json());
+    const songs = (detail.songs || []).map(s => ({
+      id: String(s.id),
+      name: s.name,
+      artist: (s.ar || []).map(a => a.name).join('/'),
+      album: s.al?.name || '',
+      cover: s.al?.picUrl || '',
+      duration: Math.floor((s.dt || 0) / 1000)
+    }));
+
+    res.json({
+      playlist_id: myLike.id,
+      playlist_name: myLike.name,
+      total: detail.songs?.length || 0,
+      songs
+    });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -621,6 +1100,94 @@ ${configCache.moodrules ? '情绪规则：' + configCache.moodrules : ''}
     console.error('情绪检查失败:', err);
     schedulerStatus.moodCheck.status = 'error';
   }
+});
+
+// ========== 模式 MD 自动学习 ==========
+// 把 play_history 里每个模式过去 14 天的播放数据 → AI 总结 → 更新 MD 的 AUTO-LEARN 区块
+async function autoLearnModeFromHistory(modeKey) {
+  if (!ALLOWED_MODE_KEYS.includes(modeKey)) return { ok: false, error: '未知模式' };
+  if (!process.env.ANTHROPIC_API_KEY) return { ok: false, error: '未配置 AI Key' };
+
+  // 这个模式过去 14 天的播放
+  const cutoff = new Date(Date.now() - 14 * 24 * 3600 * 1000).toISOString();
+  const rows = db.prepare(`SELECT song_name, artist, played_at FROM play_history WHERE mode = ? AND played_at > ? ORDER BY played_at DESC LIMIT 200`).all(modeKey, cutoff);
+
+  if (rows.length < 3) return { ok: false, error: `数据不足（${rows.length} 条），暂不更新` };
+
+  // 时段分布
+  const buckets = {};
+  const artistCount = {};
+  for (const r of rows) {
+    const d = new Date(r.played_at.endsWith('Z') ? r.played_at : r.played_at + 'Z');
+    const b = getTimeBucket(d);
+    const w = isWorkday(d) ? '工作日' : '休息日';
+    const key = `${w} ${b}`;
+    buckets[key] = (buckets[key] || 0) + 1;
+    artistCount[r.artist] = (artistCount[r.artist] || 0) + 1;
+  }
+  const topArtists = Object.entries(artistCount).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const topBuckets = Object.entries(buckets).sort((a, b) => b[1] - a[1]).slice(0, 5);
+
+  const summary = [
+    `# ${modeKey} 模式 · 过去 14 天数据`,
+    `播放总数：${rows.length}`,
+    `常用时段：${topBuckets.map(([k, n]) => `${k}(${n})`).join(', ')}`,
+    `常听艺术家：${topArtists.map(([a, n]) => `${a}(${n})`).join(', ')}`,
+    `代表歌曲：${rows.slice(0, 12).map(r => `《${r.song_name}》${r.artist}`).join('；')}`
+  ].join('\n');
+
+  // 让 AI 提炼 4-8 条具体的偏好规律
+  const sysPrompt = `你帮用户提炼 "${modeKey}" 模式下的听歌偏好规律。基于下面的统计数据，输出 4-8 条精准、可操作的规律（每条 1-2 行）。
+- 用第二人称（"你"）
+- 每条尽量具体（艺术家、时段、风格）
+- 不要笼统话（如"你喜欢音乐"）
+- 直接列点输出，不要 JSON、不要解释`;
+
+  try {
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });
+    const response = await anthropic.messages.create({
+      model: process.env.ANTHROPIC_MODEL,
+      max_tokens: 1024,
+      system: sysPrompt,
+      messages: [{ role: 'user', content: summary }]
+    });
+    const blocks = response.content || [];
+    let text = blocks.filter(b => b.type === 'text').map(b => b.text || '').join('').trim();
+    if (!text) text = blocks.map(b => b.text || '').filter(Boolean).join('').trim();
+    if (!text) return { ok: false, error: 'AI 返回为空' };
+
+    // 写入 AUTO-LEARN 区块
+    const fp = ensureModeMd(modeKey);
+    const md = fs.readFileSync(fp, 'utf-8');
+    const ts = new Date().toLocaleString('zh-CN');
+    const learned = `更新于 ${ts}（基于 ${rows.length} 条播放数据）\n\n${text}`;
+    const newMd = md.replace(
+      /<!-- AUTO-LEARN-START -->[\s\S]*?<!-- AUTO-LEARN-END -->/,
+      `<!-- AUTO-LEARN-START -->\n${learned}\n<!-- AUTO-LEARN-END -->`
+    );
+    fs.writeFileSync(fp, newMd, 'utf-8');
+    console.log(`[mode-learn] ${modeKey} 已更新（基于 ${rows.length} 条记录）`);
+    return { ok: true, samples: rows.length, learned: text };
+  } catch (e) {
+    console.warn(`[mode-learn] ${modeKey} 失败:`, e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+// 凌晨 3 点自动跑一次
+cron.schedule('0 3 * * *', async () => {
+  console.log('[cron] 模式偏好自动学习开始...');
+  for (const k of ALLOWED_MODE_KEYS) {
+    await autoLearnModeFromHistory(k);
+  }
+  console.log('[cron] 模式偏好自动学习完成');
+});
+
+// 手动触发某个模式的学习
+app.post('/api/radio/modes/:key/learn', async (req, res) => {
+  const r = await autoLearnModeFromHistory(req.params.key);
+  if (!r.ok) return res.status(400).json(r);
+  res.json(r);
 });
 
 // ========== 定时任务 API ==========

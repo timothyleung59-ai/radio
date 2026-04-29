@@ -36,6 +36,20 @@ export const netease = {
     return data.result || [];
   },
 
+  async getLoginStatus() {
+    const res = await fetch('/api/netease/login-status');
+    return res.json();
+  },
+
+  async getMyLikes(limit = 300) {
+    const res = await fetch(`/api/netease/me/likes?limit=${limit}`);
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+    return res.json();
+  },
+
   async getPlaylistDetail(id) {
     const res = await fetch(`/api/netease/playlist/detail?id=${id}`);
     const data = await res.json();

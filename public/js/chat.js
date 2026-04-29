@@ -13,8 +13,8 @@ function formatTime(s) {
 }
 
 const avatarSrc = {
-  assistant: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32'%3E%3Ccircle fill='%234a6cf7' cx='16' cy='16' r='16'/%3E%3Ctext x='16' y='20' fill='%23fff' font-size='14' text-anchor='middle'%3EC%3C/text%3E%3C/svg%3E",
-  user: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32'%3E%3Ccircle fill='%239b59b6' cx='16' cy='16' r='16'/%3E%3Ctext x='16' y='20' fill='%23fff' font-size='14' text-anchor='middle'%3EY%3C/text%3E%3C/svg%3E"
+  assistant: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32'%3E%3Ccircle fill='%23EC4141' cx='16' cy='16' r='16'/%3E%3Ctext x='16' y='20' fill='%23fff' font-size='14' text-anchor='middle' font-family='Inter,sans-serif' font-weight='600'%3EC%3C/text%3E%3C/svg%3E",
+  user: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32'%3E%3Ccircle fill='%23404040' cx='16' cy='16' r='16'/%3E%3Ctext x='16' y='20' fill='%23fff' font-size='14' text-anchor='middle' font-family='Inter,sans-serif' font-weight='600'%3E我%3C/text%3E%3C/svg%3E"
 };
 
 function addMessage(role, content, extra = '') {
@@ -137,7 +137,13 @@ async function sendMessage() {
                 }));
               }
 
-              if (segue) html += renderVoiceMsg(segue);
+              if (segue) {
+                html += renderVoiceMsg(segue);
+                // AI DJ 自动开口讲串场词（可在 localStorage 关闭：claudio_dj_autospeak=0）
+                if (localStorage.getItem('claudio_dj_autospeak') !== '0') {
+                  setTimeout(() => window.voice?.speak?.(segue), 300);
+                }
+              }
               if (resolvedSongs.length > 0) {
                 html += resolvedSongs.map(s => renderSongCard(s)).join('');
                 // 自动加入队列并播放第一首
