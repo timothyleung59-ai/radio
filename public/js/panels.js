@@ -83,9 +83,12 @@ export async function loadFavorites() {
   // 渲染网易云区块
   if (netLikes && netLikes.songs?.length > 0) {
     html += `
-      <div style="display:flex;align-items:baseline;justify-content:space-between;padding:8px 12px;margin-top:4px">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;padding:8px 12px;margin-top:4px;gap:8px;flex-wrap:wrap">
         <h3 style="font-size:13px;font-weight:600;color:var(--accent-bright)">网易云 · ${netLikes.playlist_name || '我喜欢的音乐'}</h3>
-        <button id="playAllNetLikes" class="btn-ghost" style="height:28px;padding:0 12px;font-size:12px">▶ 全部播放</button>
+        <div style="display:flex;gap:6px">
+          <button id="importNetLikes" class="btn-ghost" style="height:28px;padding:0 12px;font-size:12px" title="把所有网易云收藏灌进本地，给 AI 选歌当锚点">📥 全部导入</button>
+          <button id="playAllNetLikes" class="btn-ghost" style="height:28px;padding:0 12px;font-size:12px">▶ 全部播放</button>
+        </div>
       </div>
     `;
     html += netLikes.songs.map(s => renderSongRow(s)).join('');
@@ -128,6 +131,28 @@ export async function loadFavorites() {
     window.player?.setQueue?.(netLikes.songs, 0);
     window.player?.playSong?.(netLikes.songs[0]);
     window.showToast(`已加入 ${netLikes.songs.length} 首到播放列表`);
+  });
+
+  // 「全部导入」按钮：把网易云 likes 灌进本地 favorites 表，给 AI 选歌的样本池
+  document.getElementById('importNetLikes')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    const orig = btn.textContent;
+    btn.textContent = '导入中…';
+    try {
+      const r = await server.post('/api/admin/import-netease-likes', { limit: 500 });
+      if (r.ok) {
+        window.showToast(r.message || `导入 ${r.inserted} 首新歌`, 3500);
+        await loadFavorites(); // 刷新面板，去重显示更新
+      } else {
+        window.showToast(r.error || '导入失败');
+      }
+    } catch (err) {
+      window.showToast('导入失败：' + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = orig;
+    }
   });
 }
 

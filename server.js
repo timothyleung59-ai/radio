@@ -837,13 +837,25 @@ app.post('/api/radio/next', async (req, res) => {
     // 习惯切片（默认模式重点用，其他模式作辅助）
     const habit = buildHabitSnapshot();
 
+    // 「绝对禁止」列表：服务端从 play_history 抓最近 50 + 客户端送来的 recent 合并去重。
+    // 目的：刷新页面/跨会话也能避免重复推荐，AI 不再卡在那几首"安全选择"上。
+    const dbRecent = db.prepare(`SELECT song_name, artist FROM play_history ORDER BY id DESC LIMIT 50`).all();
+    const noRepeatMap = new Map(); // 'name|artist' → 显示标签
+    for (const r of dbRecent) {
+      if (r.song_name) noRepeatMap.set(`${r.song_name}|${r.artist || ''}`, `《${r.song_name}》${r.artist || ''}`);
+    }
+    for (const r of recentPlayed) {
+      if (r.name) noRepeatMap.set(`${r.name}|${r.artist || ''}`, `《${r.name}》${r.artist || ''}`);
+    }
+    const noRepeatLabels = Array.from(noRepeatMap.values());
+
     const ctx = [];
     ctx.push(`【当前模式】${mode.label}`);
     ctx.push(`【选歌风格】${mode.style}`);
     ctx.push(`【DJ 说话语调】${mode.patterTone}`);
     ctx.push(`【现在时间】${habit.weekdayType} · ${habit.timeBucket}`);
     if (currentSong) ctx.push(`【当前播放】《${currentSong.name}》— ${currentSong.artist}`);
-    if (recentPlayed.length) ctx.push(`【刚听过的（不要重复）】${recentPlayed.slice(0, 6).map(s => `《${s.name}》${s.artist}`).join('; ')}`);
+    if (noRepeatLabels.length) ctx.push(`【近期已听 — 绝对禁止从这里选任何一首】\n${noRepeatLabels.join('; ')}`);
 
     if (modeKey === 'default') {
       if (habit.sample.length > 0) {
@@ -870,11 +882,20 @@ app.post('/api/radio/next', async (req, res) => {
 【硬规则 - 必须遵守】
 - 严格输出 JSON，不要任何解释/markdown 包裹
 - 只挑 1 首歌
-- 不能与"刚听过的"重复
+- 绝对禁止【近期已听】列表里的任何一首（包括翻唱版、Live 版、Remix、不同专辑版本）
 - 选歌必须严格符合【选歌风格】定义的风格基调
 - 串场词必须严格符合【DJ 说话语调】的语气、风格、用词
 - 串场词要像电台主持人在话筒前真说话，不是写稿；不要书面语
 - 优先选用网易云上能找到的歌
+
+【多样性 - 重要】
+- 不要总聚焦在【长期品味】里反复出现的少数艺术家。在符合风格基调的前提下，主动拓宽。
+- 禁止连续 2 次从同一艺术家选歌（除非用户在【最近聊天】里明确点名要听）。
+- 鼓励偶尔尝试【长期品味】没明确提到、但风格相邻的艺术家。例：
+  · 你 taste 写"周杰伦 / 林俊杰" → 偶尔可以推 陶喆同期作品、王力宏、Khalil Fong
+  · 你 taste 写"Bruno Mars" → 可以推 Anderson .Paak / Daniel Caesar / Silk Sonic / The Weeknd 早期
+  · 你 taste 写"方大同" → 可以推 Tank / 徐佳莹 / 王若琳 / 陶喆 较冷门曲目
+- 在【喜欢歌曲样本】的艺术家之外，每 5 首推荐里至少 1 首是"探索曲"（相邻风格的新艺术家）。
 
 【输出 schema】
 {"song":{"name":"歌名","artist":"歌手"},"reason":"为何选这首（一句话内）","intro":"DJ 串场词（30-60字，严格按 DJ 说话语调写）"}`;
@@ -1203,6 +1224,57 @@ app.get('/api/netease/me/likes', async (req, res) => {
       songs
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 把网易云「我喜欢的音乐」一次性灌进本地 favorites 表（INSERT OR IGNORE 幂等）。
+// 解决 AI 选歌锚点池太小（之前 favorites 只有几十首）→ 推荐总在 taste.md 那几个艺术家打转的问题。
+app.post('/api/admin/import-netease-likes', async (req, res) => {
+  try {
+    if (!NETEASE_COOKIE) return res.status(401).json({ error: '未配置 NETEASE_COOKIE' });
+    const limit = Math.min(parseInt(req.body?.limit) || 500, 1000);
+
+    const stat = await fetch(neteaseUrl('/login/status')).then(r => r.json());
+    const uid = stat.data?.profile?.userId;
+    if (!uid) return res.status(401).json({ error: 'Cookie 无效或已过期' });
+
+    const playlists = await fetch(neteaseUrl('/user/playlist', { uid, limit: 1 })).then(r => r.json());
+    const myLike = playlists.playlist?.[0];
+    if (!myLike) return res.status(404).json({ error: '未找到「我喜欢的音乐」歌单' });
+
+    const detail = await fetch(neteaseUrl('/playlist/track/all', { id: myLike.id, limit, offset: 0 })).then(r => r.json());
+    const songs = detail.songs || [];
+
+    const stmt = db.prepare(`
+      INSERT OR IGNORE INTO favorites (song_id, song_name, artist, album, cover_url)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    let inserted = 0, skipped = 0;
+    const tx = db.transaction((rows) => {
+      for (const s of rows) {
+        const result = stmt.run(
+          String(s.id),
+          s.name,
+          (s.ar || []).map(a => a.name).join('/'),
+          s.al?.name || '',
+          s.al?.picUrl || ''
+        );
+        if (result.changes > 0) inserted++;
+        else skipped++;
+      }
+    });
+    tx(songs);
+
+    res.json({
+      ok: true,
+      total: songs.length,
+      inserted,
+      skipped,
+      message: `从网易云导入 ${songs.length} 首：${inserted} 首新加，${skipped} 首已存在`
+    });
+  } catch (e) {
+    console.error('import-netease-likes 失败:', e);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ========== Mock 日历 API ==========
