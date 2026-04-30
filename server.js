@@ -111,7 +111,7 @@ app.get('/api/health', (req, res) => {
 // ========== 收藏 API ==========
 app.get('/api/favorites', (req, res) => {
   const rows = db.prepare('SELECT * FROM favorites ORDER BY added_at DESC').all();
-  res.json(rows);
+  res.json(httpsifyNeteaseAssets(rows));
 });
 
 // 同步收藏到网易云「我喜欢的音乐」（需要 cookie）
@@ -150,7 +150,7 @@ app.delete('/api/favorites/:songId', async (req, res) => {
 app.get('/api/history', (req, res) => {
   const limit = parseInt(req.query.limit) || 50;
   const rows = db.prepare('SELECT * FROM play_history ORDER BY played_at DESC LIMIT ?').all(limit);
-  res.json(rows);
+  res.json(httpsifyNeteaseAssets(rows));
 });
 
 // 兼容旧表：尝试加 mode 列（已存在则忽略）
@@ -219,7 +219,7 @@ app.put('/api/preferences', (req, res) => {
 // ========== 播放状态 API ==========
 app.get('/api/playback-state', (req, res) => {
   const state = db.prepare('SELECT * FROM playback_state WHERE id = 1').get();
-  res.json(state);
+  res.json(httpsifyNeteaseAssets(state));
 });
 
 app.put('/api/playback-state', (req, res) => {
@@ -237,7 +237,7 @@ app.put('/api/playback-state', (req, res) => {
 app.get('/api/chat/history', (req, res) => {
   const limit = parseInt(req.query.limit) || 100;
   const rows = db.prepare('SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?').all(limit);
-  res.json(rows.reverse());
+  res.json(httpsifyNeteaseAssets(rows.reverse()));
 });
 
 // 清空聊天历史
@@ -614,6 +614,26 @@ function neteaseUrl(path, params = {}) {
   return url.toString();
 }
 
+// 网易云 CDN 默认返回 http:// URL（音频/封面/歌词外链等），
+// 但浏览器在 HTTPS 页面上会拒载 HTTP 音频（mixed content），封面也会拉低 padlock。
+// 网易云 CDN 实测原生支持 HTTPS（206 + audio/mpeg 正常），所以直接 sed 一刀。
+const NETEASE_HTTPS_HOSTS = /^http:\/\/((?:m\d*|p\d+|ws\d*|comment\d*|interface\d*)\.music\.126\.net|y\.music\.163\.com|p\d+\.music\.126\.net|p\d+\.netease\.im)/;
+function httpsifyNeteaseAssets(value) {
+  if (typeof value === 'string') {
+    if (NETEASE_HTTPS_HOSTS.test(value)) return 'https://' + value.slice(7);
+    return value;
+  }
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) value[i] = httpsifyNeteaseAssets(value[i]);
+    return value;
+  }
+  if (value && typeof value === 'object') {
+    for (const k of Object.keys(value)) value[k] = httpsifyNeteaseAssets(value[k]);
+    return value;
+  }
+  return value;
+}
+
 // 服务端解析歌曲：AI 返回的歌名 → 网易云真实数据
 async function resolveSong(song) {
   try {
@@ -625,7 +645,7 @@ async function resolveSong(song) {
     const match = results.find(r => r.name === song.name) || results[0];
     if (!match) return song;
     const cover = match.al?.picUrl || '';
-    return { id: String(match.id), name: match.name, artist: (match.ar || []).map(a => a.name).join('/'), album: match.al?.name || '', cover, reason: song.reason || '' };
+    return httpsifyNeteaseAssets({ id: String(match.id), name: match.name, artist: (match.ar || []).map(a => a.name).join('/'), album: match.al?.name || '', cover, reason: song.reason || '' });
   } catch { return song; }
 }
 
@@ -634,7 +654,7 @@ app.get('/api/netease/search', async (req, res) => {
     const { keywords, limit = 20 } = req.query;
     const r = await fetch(neteaseUrl('/cloudsearch', { keywords, type: 1, limit }));
     const data = await r.json();
-    res.json(data);
+    res.json(httpsifyNeteaseAssets(data));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -643,7 +663,7 @@ app.get('/api/netease/song/url', async (req, res) => {
     const { id, br = 320000 } = req.query;
     const r = await fetch(neteaseUrl('/song/url', { id, br }));
     const data = await r.json();
-    res.json(data);
+    res.json(httpsifyNeteaseAssets(data));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -651,7 +671,7 @@ app.get('/api/netease/lyric', async (req, res) => {
   try {
     const r = await fetch(neteaseUrl('/lyric', { id: req.query.id }));
     const data = await r.json();
-    res.json(data);
+    res.json(httpsifyNeteaseAssets(data));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -659,7 +679,7 @@ app.get('/api/netease/personalized', async (req, res) => {
   try {
     const r = await fetch(neteaseUrl('/personalized', { limit: req.query.limit || 10 }));
     const data = await r.json();
-    res.json(data);
+    res.json(httpsifyNeteaseAssets(data));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -667,7 +687,7 @@ app.get('/api/netease/playlist/detail', async (req, res) => {
   try {
     const r = await fetch(neteaseUrl('/playlist/detail', { id: req.query.id }));
     const data = await r.json();
-    res.json(data);
+    res.json(httpsifyNeteaseAssets(data));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -679,13 +699,13 @@ app.get('/api/netease/login-status', async (req, res) => {
     const data = await r.json();
     const profile = data.data?.profile;
     if (!profile) return res.json({ logged_in: false });
-    res.json({
+    res.json(httpsifyNeteaseAssets({
       logged_in: true,
       user_id: profile.userId,
       nickname: profile.nickname,
       avatar: profile.avatarUrl,
       vip_type: data.data?.account?.vipType || 0
-    });
+    }));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -1168,12 +1188,12 @@ app.get('/api/netease/me/likes', async (req, res) => {
       duration: Math.floor((s.dt || 0) / 1000)
     }));
 
-    res.json({
+    res.json(httpsifyNeteaseAssets({
       playlist_id: myLike.id,
       playlist_name: myLike.name,
       total: detail.songs?.length || 0,
       songs
-    });
+    }));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
