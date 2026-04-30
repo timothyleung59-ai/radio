@@ -55,6 +55,9 @@ function setRadio(on, modeKey = null, opts = {}) {
   const explicitModeChange = modeKey && (!radioOn || modeKey !== currentMode);
   // 模式变了 / 关电台 → 之前预取的下一首不再合用，作废（含飞行中）
   if (!on || explicitModeChange) invalidatePrefetch();
+  // 显式切到新模式 → 清空播放列表，让新模式从干净状态起步
+  // （关电台 / 页面重启恢复都不清，避免误删用户手动构建的队列）
+  if (explicitModeChange) window.player?.setQueue?.([], 0);
   radioOn = on;
   if (modeKey) {
     currentMode = modeKey;
