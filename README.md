@@ -57,6 +57,31 @@ npm run all        # ★ 同时起两个，开发推荐用这个
 npm run all:dev    # 同上 + nodemon
 ```
 
+### Docker 部署
+
+```bash
+git clone <this-repo> claudio
+cd claudio
+cp .env.example .env       # 编辑填真实凭证
+
+# ⚠️ 容器内进程是 node 用户（UID 1000），但宿主机这两个目录默认 root:root
+#    不预先 chown 会导致 SQLite 无法打开（SQLITE_CANTOPEN）
+mkdir -p data
+chown -R 1000:1000 data config
+
+docker compose up -d --build
+docker compose logs -f claudio
+```
+
+服务起来后访问 `http://<host>:8081/`。compose 已配置：
+
+- `claudio-fm` 容器 → 宿主机 8081（compose 里改 `ports:` 即可）
+- `claudio-netease` 容器 → 仅内网 `claudio-net` 暴露，不出容器
+- `data/` 与 `config/` 双向 bind mount，配置改完热加载、DB 持久化
+
+> Dockerfile 里的 apk + npm 都已切到阿里云镜像（首次冷 build 约 8–15 分钟）。
+> 要换腾讯：把 `mirrors.aliyun.com` 改成 `mirrors.tencent.com`，npm registry 改 `https://mirrors.tencent.com/npm/` 即可。
+
 ## .env 字段
 
 ```env

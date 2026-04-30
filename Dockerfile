@@ -3,6 +3,10 @@ FROM node:20-alpine AS deps
 
 WORKDIR /app
 
+# 用阿里云镜像加速 apk + npm（要切腾讯改成 mirrors.tencent.com / mirrors.cloud.tencent.com）
+RUN sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories && \
+    npm config set registry https://registry.npmmirror.com
+
 # better-sqlite3 需要 native 编译
 RUN apk add --no-cache python3 make g++ libc6-compat
 
@@ -13,6 +17,9 @@ RUN npm install --omit=dev --no-audit --no-fund
 FROM node:20-alpine
 
 WORKDIR /app
+
+# 同样换镜像源（运行阶段只装 tzdata 一项，但保持一致避免下次扩展时漏改）
+RUN sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories
 
 # 时区（China）；按需改 / 删
 RUN apk add --no-cache tzdata && \
