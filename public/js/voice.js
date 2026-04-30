@@ -75,18 +75,43 @@ function drawCoverWave() {
   waveAnimId = requestAnimationFrame(drawCoverWave);
 }
 
+// 每次 TTS 播放都重建 source → gain → analyser → destination 链路
+// （createMediaElementSource 一个 Audio 元素只能创一次，所以每次新 Audio 都要新链路）
+const TTS_GAIN = 1.8; // 客户端额外增益；叠加服务端 VOLC_VOLUME 后约 3-3.6 倍
+let currentChain = null;
+
 function setupAudioAnalyser(audioEl) {
-  if (audioCtx) return;
   try {
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 128;
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    // iOS/Safari 等场景：用户首次交互前 ctx 是 suspended，强制 resume
+    if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+
+    // 上一条 TTS 的链路如果还在，先断开
+    if (currentChain) {
+      try {
+        currentChain.source.disconnect();
+        currentChain.gain.disconnect();
+        currentChain.analyser.disconnect();
+      } catch {}
+    }
+
     const source = audioCtx.createMediaElementSource(audioEl);
-    source.connect(analyser);
-    analyser.connect(audioCtx.destination);
+    const gainNode = audioCtx.createGain();
+    gainNode.gain.value = TTS_GAIN;
+    const newAnalyser = audioCtx.createAnalyser();
+    newAnalyser.fftSize = 128;
+
+    source.connect(gainNode);
+    gainNode.connect(newAnalyser);
+    newAnalyser.connect(audioCtx.destination);
+
+    analyser = newAnalyser;
     freqData = new Uint8Array(analyser.frequencyBinCount);
+    currentChain = { source, gain: gainNode, analyser: newAnalyser };
   } catch (e) {
-    console.warn('音频分析器初始化失败:', e);
+    console.warn('音频链路初始化失败:', e);
   }
 }
 
@@ -130,42 +155,70 @@ function fallbackWebSpeech(text) {
 async function speak(text) {
   if (!text || isSpeaking) return;
   startSpeaking();
+  console.info('[voice] speak() 启动，text 长度', text.length);
 
+  let res;
   try {
-    const res = await fetch('/api/tts', {
+    res = await fetch('/api/tts', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
       body: JSON.stringify({ text })
     });
-    if (res.status === 503) {
-      fallbackWebSpeech(text);
-      return;
-    }
-    if (!res.ok) {
-      console.warn('TTS 服务错误，回退到浏览器语音');
-      fallbackWebSpeech(text);
-      return;
-    }
-
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    currentAudio = new Audio(url);
-    setupAudioAnalyser(currentAudio);
-    currentAudio.onended = () => {
-      URL.revokeObjectURL(url);
-      currentAudio = null;
-      endSpeaking();
-    };
-    currentAudio.onerror = () => {
-      URL.revokeObjectURL(url);
-      currentAudio = null;
-      console.warn('TTS 音频播放失败，回退');
-      fallbackWebSpeech(text);
-    };
-    await currentAudio.play();
   } catch (e) {
-    console.warn('TTS 异常，回退:', e);
+    console.warn('[voice] /api/tts 网络异常 → 回退浏览器语音:', e);
     fallbackWebSpeech(text);
+    return;
+  }
+
+  if (res.status === 503) {
+    console.warn('[voice] /api/tts 返回 503（火山未配置）→ 回退浏览器语音');
+    fallbackWebSpeech(text);
+    return;
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    console.warn(`[voice] /api/tts 返回 ${res.status} → 回退浏览器语音。body:`, body.slice(0, 200));
+    fallbackWebSpeech(text);
+    return;
+  }
+
+  const ctype = res.headers.get('content-type') || '';
+  console.info('[voice] /api/tts 200，content-type =', ctype, '尝试火山 TTS 播放');
+
+  const blob = await res.blob();
+  if (blob.size < 200) {
+    console.warn('[voice] TTS 返回 blob 太小（', blob.size, 'B），可能是错误响应 → 回退浏览器语音');
+    fallbackWebSpeech(text);
+    return;
+  }
+  const url = URL.createObjectURL(blob);
+  currentAudio = new Audio(url);
+  // 不再连 Web Audio 链路（GainNode 会让 audioCtx 处于 suspended 时静音）
+  // 直接用 HTML5 Audio 播放，音量靠服务端的 VOLC_VOLUME=2.0 + 默认 1.0
+  currentAudio.volume = 1.0;
+
+  currentAudio.onended = () => {
+    URL.revokeObjectURL(url);
+    currentAudio = null;
+    endSpeaking();
+  };
+  currentAudio.onerror = (e) => {
+    console.warn('[voice] currentAudio onerror:', e);
+    URL.revokeObjectURL(url);
+    currentAudio = null;
+    endSpeaking();
+  };
+
+  try {
+    await currentAudio.play();
+    console.info('[voice] 火山 TTS 已开始播放（', blob.size, 'B mp3）');
+  } catch (e) {
+    // 自动播放策略阻塞 — 不回退 Web Speech（同样会被阻），直接结束
+    console.warn('[voice] play() 被阻塞（多半是浏览器 autoplay policy）:', e);
+    URL.revokeObjectURL(url);
+    currentAudio = null;
+    endSpeaking();
+    window.showToast?.('TTS 被浏览器拦截，请先点一下页面再试');
   }
 }
 
@@ -178,7 +231,34 @@ function stop() {
   endSpeaking();
 }
 
-window.voice = { speak, stop, isSpeaking: () => isSpeaking };
+// 直接播放预合成好的音频 Blob URL（由 radio.js 预取串词时调用）
+async function speakUrl(url) {
+  if (!url || isSpeaking) return;
+  startSpeaking();
+  try {
+    currentAudio = new Audio(url);
+    currentAudio.volume = 1.0;
+    currentAudio.onended = () => {
+      try { URL.revokeObjectURL(url); } catch {}
+      currentAudio = null;
+      endSpeaking();
+    };
+    currentAudio.onerror = (e) => {
+      try { URL.revokeObjectURL(url); } catch {}
+      currentAudio = null;
+      console.warn('[voice] 预加载 TTS 播放出错:', e);
+      endSpeaking();
+    };
+    await currentAudio.play();
+    console.info('[voice] 预加载 TTS 已开始播放');
+  } catch (e) {
+    try { URL.revokeObjectURL(url); } catch {}
+    console.warn('[voice] 预加载 TTS play() 被阻塞:', e);
+    endSpeaking();
+  }
+}
+
+window.voice = { speak, speakUrl, stop, isSpeaking: () => isSpeaking };
 
 // 让旧的全屏 overlay 永远不出现
 const overlay = document.getElementById('voiceOverlay');

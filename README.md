@@ -1,303 +1,306 @@
-<div align="center">
-
-<img src="docs/hero-banner.svg" alt="Claudio FM Hero Banner" width="100%" />
-
 # Claudio FM
 
-### An immersive AI Radio web app for music, chat, mood, and playback
+个人 AI 电台，Vanilla JS + Express + SQLite。
 
-<p>
-  <img alt="Node.js" src="https://img.shields.io/badge/Node.js-18%2B-339933?logo=node.js&logoColor=white">
-  <img alt="Express" src="https://img.shields.io/badge/Express-5.x-000000?logo=express&logoColor=white">
-  <img alt="SQLite" src="https://img.shields.io/badge/SQLite-better--sqlite3-003B57?logo=sqlite&logoColor=white">
-  <img alt="Anthropic SDK" src="https://img.shields.io/badge/Anthropic-SDK-191919">
-  <img alt="PWA" src="https://img.shields.io/badge/PWA-ready-5A0FC8">
-  <img alt="Claude Code" src="https://img.shields.io/badge/Built%20with-Claude%20Code-6C47FF">
-</p>
+## 它做什么
 
-**模仿 mmguo 风格 AI 电台体验，结合 AI DJ 对话、音乐推荐、播放器联动、歌词翻页和沉浸式视觉氛围。**
-
-作者注：使用Claude-code + MiMo-V2.5-Pro模型 + vibe-coding + sleep-coding
-
-</div>
-
----
-
-## 目录
-
-- [项目简介](#项目简介)
-- [效果预览](#效果预览)
-- [核心特性](#核心特性)
-- [为什么这个项目有意思](#为什么这个项目有意思)
-- [技术栈](#技术栈)
-- [简易功能介绍](#简易功能介绍)
-- [项目结构](#项目结构)
-- [环境变量](#环境变量)
-- [快速开始](#快速开始)
-- [运行逻辑](#运行逻辑)
-- [后续扩展方向](#后续扩展方向)
-- [致谢](#致谢)
-- [License](#license)
-
----
-
-## 项目简介
-
-Claudio FM 是一个偏产品原型与体验设计导向的 AI 音乐项目。
-
-它把这些东西组合在了一起：
-
-- **AI DJ 对话**：你可以直接和 Claudio 聊天、点歌、问歌、聊氛围
-- **音乐推荐联动**：AI 回复不只是文字，还能转成可播放歌曲卡片
-- **播放器体验**：封面、歌词、队列、收藏、历史、续播都整合在同一套交互里
-- **电台氛围 UI**：动态取色、流体背景、歌词翻页、频谱感、DJ voice mode
-
-它不是传统意义上的播放器，也不是普通聊天机器人，而是更像一个：
-
-> **会陪你听歌、懂上下文、还能顺手把歌播起来的 AI 电台搭子。**
-
----
-
-## 效果预览
-
-### Home / Player / Chat
-
-<p align="center">
-  <img src="docs/screenshots/PixPin_2026-04-28_09-00-25.png" width="30%" alt="home">
-  <img src="docs/screenshots/PixPin_2026-04-28_09-00-43.png" width="30%" alt="player">
-  <img src="docs/screenshots/PixPin_2026-04-28_09-21-59.png" width="30%" alt="chat">
-</p>
-
----
-
-## 核心特性
-
-### 1. AI DJ 对话体验
-- 支持自然语言聊天
-- AI 可结合当前播放歌曲继续对话
-- 支持结构化返回 `say / reason / play / segue`
-- 聊天记录自动保存，刷新后可恢复历史内容
-
-### 2. 音乐推荐与播放联动
-- AI 推荐歌曲后自动生成歌曲卡片
-- 支持一键播放 / 加入当前播放队列
-- 支持 `搜索xxx`、`播放xxx`、下一首、暂停等简单指令
-- 自动通过网易云搜索补全真实歌曲信息与可播放音源
-
-### 3. 沉浸式播放器
-- 专辑封面、歌词、播放控制整合在同一页面
-- 支持播放 / 暂停 / 上一首 / 下一首 / 随机 / 循环
-- 支持音量调节、迷你播放器、播放列表面板
-- 自动保存播放状态，支持跨会话续播
-
-### 4. 歌词与视觉氛围
-- 封面可翻转进入歌词页
-- 歌词随播放进度高亮滚动
-- 根据专辑封面自动取色驱动整页主题
-- 带流体背景、氛围光晕、频谱感 UI
-
-### 5. DJ Voice Mode
-- 支持 DJ 语音沉浸模式
-- 在推荐/讲歌场景下触发更像“电台播报”的表达方式
-- 带波形展示，让反馈更有陪伴感
-
-### 6. 本地化与持久化
-- SQLite 存储收藏、历史记录、聊天记录、偏好设置、播放状态
-- 支持收藏歌曲、最近播放、聊天历史持久化
-- 无需额外数据库服务，个人项目开箱即用
-
-### 7. 可配置 AI 模型
-- 后端使用 `@anthropic-ai/sdk`
-- 支持配置 `ANTHROPIC_BASE_URL`
-- 支持通过 `ANTHROPIC_MODEL` 切换模型
-- 可接入 **MiMo-V2.5-Pro** 等 Anthropic-compatible 模型
-
----
-
-## 为什么这个项目有意思
-
-### 不是“AI + 播放器”拼接，而是真联动
-AI 的输出会直接影响播放器行为，而不是只停留在聊天气泡里。
-
-### 不是只做功能，而是明显在做氛围
-这个项目很强调“数字电台感”和“陪伴感”，视觉、声音、交互都是围绕这个目标去搭的。
-
-### 架构不重，但完整度够高
-纯前端页面 + Node.js 单服务 + SQLite，本地跑起来很轻，但功能闭环已经比较完整。
-
-### 很适合继续二开
-适合往这些方向继续扩展：
-- AI Radio
-- AI DJ
-- 音乐陪伴类产品
-- AI + 内容消费体验
-- Anthropic-compatible 接口实践项目
-
----
+- **6 个电台模式**（默认 / 工作 / 运动 / 驾驶 / 休息 / 睡前），每个模式有独立的选歌风格、DJ 语调、可手动编辑的偏好 markdown
+- **真 AI DJ**：当前歌结束 → AI 选下一首 + 写一段电台风格串词 → 火山引擎 TTS 合成 → 串词放完无缝切到下一首
+- **预取**：当前歌一开始播，后台就把"下一首 + TTS 串词音频"全部并行准备好。切歌零等待
+- **跟 DJ 聊天**：自然语言点歌 / 推荐歌单 / 闲聊；推荐结果可一键全部加入播放列表
+- **三层情绪推断**：用户主动输入 > 最近聊天上下文 > 最近一小时播放行为（含跳过率分析）
+- **AI 品味画像**：用过去 3 天播放 + 最新 10 收藏 + taste.md 让 AI 写一段你的音乐画像
+- **模式自动学习**：每个模式过去 14 天的播放数据 → AI 提炼 4-8 条偏好规律 → 写到 `config/modes/{key}.md` 的 AUTO-LEARN 区块
+- **网易云收藏双向同步**：在 app 里点 ♡，同步加入你网易云账号"我喜欢的音乐"；显示红心的判断同时看本地 DB + 网易云 likelist
+- **AI 后台任务总控台**：DJ 头像点开 → 看每个 cron 上次跑的时间，一键手动触发
 
 ## 技术栈
 
-### Frontend
-- HTML
-- CSS
-- Vanilla JavaScript
-- Web Audio API
-- Web Speech API
-- PWA / Service Worker
+| 层 | 用了什么 |
+|---|---|
+| 前端 | Vanilla JS ES Module · Web Audio API · Service Worker |
+| 后端 | Node.js · Express 5 · `better-sqlite3` · `node-cron` · `ws` |
+| AI | `@anthropic-ai/sdk`（任意 Anthropic 兼容端点） |
+| TTS | 火山引擎豆包语音合成 V1 HTTP（1.0 系列 _bigtts 音色） |
+| 音源 | 网易云音乐 API（[NeteaseCloudMusicApi](https://github.com/Binaryify/NeteaseCloudMusicApi) 本地代理） |
+| 持久化 | SQLite（单文件 `data/claudio.db`） |
 
-### Backend
-- Node.js
-- Express
-- SQLite (`better-sqlite3`)
-- Anthropic SDK (`@anthropic-ai/sdk`)
+## 快速启动
 
-### Third-party / API
-- Anthropic-compatible API
-- 网易云音乐 API
+### 前置条件
 
----
+1. Node 18+
+2. Anthropic 兼容的 API Key
+3. （可选）火山引擎语音合成大模型账号（V1 接口、`volcano_tts` cluster），仅用于 DJ 串词的 TTS
+4. （可选）网易云账号 cookie，用于"我喜欢的音乐"同步
 
-## 简易功能介绍
-
-| 功能 | 说明 |
-| --- | --- |
-| AI 聊天 | 和 Claudio 聊天，问歌、点歌、聊氛围 |
-| 歌曲搜索 | 输入“搜索xxx”或“播放xxx”快速找歌 |
-| 智能推荐 | AI 返回推荐歌曲卡片，可直接播放 |
-| 收藏系统 | 收藏喜欢的歌曲并持久化保存 |
-| 历史记录 | 自动记录最近播放和聊天内容 |
-| 播放队列 | 支持当前播放列表查看与管理 |
-| 续播能力 | 关闭页面后再次打开可恢复播放状态 |
-| 主题氛围 | 动态背景、自动取色、歌词翻页、频谱氛围 |
-| 配置面板 | 页面内可查看并修改 API 相关配置 |
-| DJ Voice Mode | 进入更像电台播报的语音沉浸模式 |
-
----
-
-## 项目结构
+### 安装并启动
 
 ```bash
-claudio/
-├── server.js
-├── package.json
-├── .env
-├── .env.example
-├── data/
-│   └── claudio.db
-├── config/
-├── public/
-│   ├── index.html
-│   ├── css/
-│   ├── js/
-│   ├── manifest.json
-│   └── sw.js
-└── docs/
-    └── screenshots/
+git clone <this-repo>
+cd Claudio
+npm install
+cp .env.example .env       # Windows 下手动复制即可
+# 编辑 .env，至少填 ANTHROPIC_API_KEY / ANTHROPIC_MODEL
+npm run all                # 同时拉起 Claudio + NetEase API
 ```
 
----
+打开 `http://localhost:3001`。
 
-## 环境变量
+### npm scripts
 
-复制 `.env.example` 为 `.env`，并按需修改：
+```
+npm run start      # 只启动 Claudio 主服务（不含网易云 API，AI 选歌/搜歌会失败）
+npm run dev        # nodemon 模式启动 Claudio
+npm run netease    # 只启动网易云 API（端口 3000）
+npm run all        # ★ 同时起两个，开发推荐用这个
+npm run all:dev    # 同上 + nodemon
+```
+
+## .env 字段
 
 ```env
-ANTHROPIC_API_KEY=your_api_key_here
-ANTHROPIC_BASE_URL=your_base_url_here
-ANTHROPIC_MODEL=MiMo-V2.5-Pro
-NETEASE_API=your_netease_api_here
-NETEASE_COOKIE=your_netease_cookie_here
+# ===== AI =====
+ANTHROPIC_API_KEY=sk-...
+ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic   # Claude 官方就不要填这行
+ANTHROPIC_MODEL=deepseek-v4-flash                       # 任意支持 messages.create 的模型
+
+# ===== 网易云 =====
+NETEASE_API=http://localhost:3000
+NETEASE_COOKIE=MUSIC_U=xxx...                           # 可选；不填则没有"我喜欢"同步
+
+# ===== TTS（火山引擎 V1 HTTP）=====
+VOLC_APPID=...
+VOLC_ACCESS_TOKEN=...
+VOLC_CLUSTER=volcano_tts
+VOLC_VOICE_TYPE=zh_female_wanwanxiaohe_moon_bigtts      # 1.0 _bigtts 系列均可
+VOLC_VOLUME=2.0                                          # V1 范围 0.5-2.0；和客户端 GainNode 1.8x 叠加 ≈ 3.6 倍
+
+# ===== 服务 =====
 PORT=3001
 ```
 
-### 字段说明
+> **关于 V3 大模型 TTS 没接**：开发过程中尝试过 `wss://openspeech.bytedance.com/api/v3/tts/bidirection`，协议层全部走通（建连/会话/句子事件正常），但服务端持续返回 `data: null`、不出音频帧（HTTP V3、SSE V3、WebSocket V3 均如此），是账号侧资源授权问题。1.0 V1 HTTP 路径完全工作，本仓库就用它。
 
-| 变量名 | 说明 |
-| --- | --- |
-| `ANTHROPIC_API_KEY` | Anthropic 兼容接口的 API Key |
-| `ANTHROPIC_BASE_URL` | Anthropic 兼容接口 Base URL |
-| `ANTHROPIC_MODEL` | 使用的模型名，例如 `MiMo-V2.5-Pro` |
-| `NETEASE_API` | 网易云音乐 API 服务地址 |
-| `NETEASE_COOKIE` | 网易云 Cookie，用于获取更多可用内容 |
-| `PORT` | 本地服务端口 |
+## 项目结构
 
----
-
-## 快速开始
-
-### 1. 安装依赖
-
-```bash
-npm install
+```
+Claudio/
+├── server.js                 # 单文件后端 (~2000 行)
+├── package.json
+├── .env / .env.example
+├── data/
+│   └── claudio.db            # SQLite 单文件
+├── config/
+│   ├── agent.md              # AI agent 行为
+│   ├── taste.md              # 长期音乐品味（手动编辑）
+│   ├── moodrules.md          # 情绪规则（手动编辑）
+│   ├── routines.md           # 日常作息
+│   └── modes/
+│       ├── default.md        # 默认模式偏好
+│       ├── work.md
+│       ├── workout.md
+│       ├── drive.md
+│       ├── relax.md
+│       └── sleep.md
+├── public/
+│   ├── index.html            # 单页应用
+│   ├── sw.js                 # Service Worker（缓存优先策略）
+│   ├── manifest.json
+│   ├── css/                  # main.css / player.css / lyrics.css / chat.css / voice.css
+│   └── js/
+│       ├── app.js            # 总入口、视图切换、AI 任务面板、情绪面板
+│       ├── player.js         # 播放器、队列、收藏、♥ 状态
+│       ├── radio.js          # 电台模式 + 预取
+│       ├── chat.js           # DJ 聊天 + 推荐渲染
+│       ├── voice.js          # TTS 播放 + 音波可视化 + GainNode
+│       ├── panels.js         # 收藏 / 历史 / 搜索面板
+│       ├── lyrics.js         # 歌词
+│       ├── visual.js         # 封面翻转 / 频谱 / 粒子
+│       └── api.js            # netease + server 包装
+└── tts-bigtts.js             # 火山 V3 WebSocket 双向流式实现（保留供未来用）
 ```
 
-### 2. 准备环境变量
+## 核心系统
 
-```bash
-cp .env.example .env
+### 电台模式选歌 + 串词
+
+`POST /api/radio/next` 接收 `{mode, currentSong, recent}`，喂给 AI 的上下文包括：
+
+- 当前模式的硬编码 `style`（选歌风格）和 `patterTone`（DJ 语调）
+- 现在时间（工作日 / 周末 + 时段：早晨/上午/午餐/下午/晚饭/晚间/深夜）
+- 当前播放、刚听过的 6 首
+- 模式专属偏好 MD（`config/modes/{mode}.md` 全文，包含 AUTO-LEARN 区块）
+- 本地收藏样本 8 首
+- 当前电台情绪
+- 最近聊天 6 条
+- 长期品味 `config/taste.md`
+
+AI 输出严格 JSON `{song, reason, intro}`，服务端再用 `resolveSong()` 走网易云搜索补全 `{id, name, artist, album, cover}`。
+
+### 预取（零等待切歌）
+
+`radio.js` 监听 `songchange` 事件：每首歌一开始播，后台并行做：
+
+1. `POST /api/radio/next` 让 AI 选下一首并写串词
+2. `POST /api/tts` 把串词合成成 mp3 blob，存为 `URL.createObjectURL`
+3. 整体打包暂存为 `prefetched`
+
+切歌时（自然结束或用户跳）：
+
+- 模式没变 → 直接消费缓存：放预合成的 TTS blob，串词结束立即放新歌
+- 模式变了 → 走 `invalidatePrefetch()`，作废飞行中的请求（用 generation 计数器避免竞态），现拉
+
+### 三层情绪推断
+
+`resolveMood()` 优先级链（在 `server.js` 的 mood 模块内）：
+
+| 优先级 | 来源 | TTL |
+|---|---|---|
+| 1 | 用户主动输入（"今天有点累想听温柔的"） → AI 解析为 mood/genre/message | 4 小时 |
+| 2 | 最近 30 分钟跟 DJ 的聊天上下文 → AI 推断 | 30 分钟 |
+| 3 | 最近 1 小时播放行为（曲数、跳过率、艺人集中度）→ AI 推断 | 30 分钟 |
+
+UI：顶栏 🎭 pill 显示当前情绪 + 来源；点 pill 弹面板，可手动写一句话设定 / 让 AI 重新判断 / 清除回退到自动。
+
+### AI 后台任务
+
+| 任务 | 频率 | 输入 | 输出 |
+|---|---|---|---|
+| `taste-profile` | 每日 07:00 | 过去 3 天播放 + 最新 10 收藏 + `taste.md` | 120-200 字品味画像写到 `preferences.taste_profile` |
+| `mood` | 每小时整点 | 见上方"三层情绪推断" | `preferences.current_mood` |
+| `mode-learn` | 每日 03:00 | 每个模式过去 14 天的 `play_history WHERE mode=X` | 写到 `config/modes/{key}.md` 的 AUTO-LEARN 区块（4-8 条规律） |
+| `daily-playlist` | 每日 07:00 | 品味 + 最近播放 50 条 | 创建一个 `今日推荐` 歌单（10 首） |
+
+**全部支持手动触发**：DJ 头像 → AI 后台任务 → "立即跑一次"。**启动 catch-up**：服务起来 5 秒后自动检查每个任务的 `lastRun`，过期了就异步补跑（mood 1h、其他 24h），不依赖 cron 整点。
+
+### 旧历史回填
+
+`mode` 字段是数据表后加的（`ALTER TABLE`）。旧记录全是 NULL，专门模式（work/workout/...）的 AUTO-LEARN 学不到这部分历史。
+
+按"工作日 + 时段"规则一次性回填（`POST /api/admin/backfill-mode`）：
+
+| 时段 | 工作日 | 周末 |
+|---|---|---|
+| 早晨 6-10 | work | relax |
+| 上午 10-12 | work | drive |
+| 午餐 12-14 | default | default |
+| 下午 14-18 | work | drive |
+| 晚饭 18-20 | relax | relax |
+| 晚间 20-23 | relax | relax |
+| 深夜 23-6 | sleep | sleep |
+
+UI 在 DJ 头像 → 数据维护 → "📋 立即回填"。规则透明，不动已有 mode，可重跑。
+
+### 收藏与网易云同步
+
+| 操作 | 行为 |
+|---|---|
+| 点 ♡ | 写本地 `favorites` 表 + 调网易云 `/like?id=X&like=true` 同步 |
+| 取消 ♡ | 删本地 + 网易云 `/like?id=X&like=false` |
+| 红心状态判定 | 本地命中或网易云 likelist 命中（`/api/netease/likelist` 5 分钟前端缓存） |
+| 一次性把本地全部同步到网易云 | `POST /api/admin/sync-favorites-to-netease`（幂等，跳过已存在的） |
+| 我喜欢的页面 | 本地未同步部分跟网易云列表去重，同时显示 |
+
+### Service Worker 注意事项
+
+`public/sw.js` 是**缓存优先**策略。**改了任何 `public/js/*.js` 或 `public/css/*.css` 后必须 bump `CACHE_NAME`**，否则用户浏览器永远用旧缓存：
+
+```js
+const CACHE_NAME = 'claudio-fm-v17-queue-fix';   // 每次改动 +1 / 改后缀
 ```
 
-Windows 如果没有 `cp`，手动复制一份也可以。
+bump 后正常刷新即可，SW 的 `activate` 钩子会自动清旧缓存。
 
-### 3. 启动项目
+## API 速查
 
-```bash
-npm run start
+### 播放器
+
+```
+GET    /api/playback-state           # 当前播放状态（含队列）
+PUT    /api/playback-state           # 保存当前状态
+GET    /api/favorites                # 本地收藏列表
+POST   /api/favorites                # 收藏（双写本地 + 网易云）
+DELETE /api/favorites/:songId        # 取消收藏（双写）
+GET    /api/history?limit=N          # 最近播放历史
+POST   /api/history                  # 记录一首
 ```
 
-开发模式：
+### 网易云代理
 
-```bash
-npm run dev
+```
+GET    /api/netease/search           # 搜索
+GET    /api/netease/song/url         # 取播放 URL
+GET    /api/netease/lyric            # 歌词
+GET    /api/netease/me/likes         # 我喜欢的音乐（完整 song 列表）
+GET    /api/netease/likelist         # 我喜欢的 ID 数组（轻量，前端用）
 ```
 
-### 4. 打开浏览器
+### 电台 / AI
 
-```bash
-http://localhost:3001
+```
+POST   /api/radio/next               # AI 选下一首 + 串词
+POST   /api/dj/intro                 # AI 写当前歌的介绍串词
+GET    /api/radio/modes              # 所有模式
+GET    /api/radio/modes/:key/md      # 读模式偏好 MD
+PUT    /api/radio/modes/:key/md      # 改模式偏好 MD
+POST   /api/radio/modes/:key/learn   # 让 AI 学习单个模式
+GET    /api/radio/habit-snapshot     # 当前时段习惯切片
+POST   /api/dispatch                 # 跟 DJ 聊天主入口（SSE 流）
+GET    /api/chat/history             # 聊天历史
+DELETE /api/chat/history             # 清除聊天
 ```
 
-如果你修改了 `PORT`，请对应替换端口号。
+### 情绪
 
----
-
-## 运行逻辑
-
-```text
-用户输入消息
-   ↓
-服务端判断是否为简单指令 / 搜索 / AI 对话
-   ↓
-简单指令 → 直接控制播放器
-搜索请求 → 调用网易云 API
-自然语言 → 调用 Anthropic-compatible 模型
-   ↓
-返回文本 / 推荐歌曲 / segue / 语音内容
-   ↓
-前端渲染聊天气泡、歌曲卡片、播放器状态与视觉效果
+```
+GET    /api/mood                     # 当前情绪（按优先级链解析）
+POST   /api/mood                     # 用户主动设定 (body: {input})
+POST   /api/mood/refresh             # 强制重新推断
+DELETE /api/mood                     # 清除用户设定，回退自动
 ```
 
----
+### TTS
 
-## 后续扩展方向
+```
+POST   /api/tts                      # 文字 → mp3 audio buffer (text/event-stream off)
+                                       # body: {text, style?}
+                                       # 默认走火山 V1 HTTP，可设 VOLC_USE_V3=1 切到 V3 WebSocket
+```
 
-- 接更多音乐平台
-- 接更完整的 TTS 服务，而不只依赖浏览器语音
-- 增加 AI 长期记忆和用户音乐画像
-- 增加每日推荐 / 情绪电台 / 自动歌单生成
-- 增加账号系统、云同步、多端续播
-- 增加更完整的移动端 PWA 安装体验
+### 调度器 / 数据维护
 
----
+```
+GET    /api/scheduler/status                        # 各任务 lastRun 状态
+GET    /api/scheduler/daily-playlist                # 最新的"今日推荐"歌单
+GET    /api/scheduler/mood                          # 直接读 current_mood（旧端点）
+GET    /api/scheduler/taste-profile                 # 当前品味画像
+POST   /api/scheduler/trigger/:task                 # 触发 (task: daily-playlist / mood / mode-learn / taste-profile)
+POST   /api/admin/backfill-mode                     # 回填旧历史的 mode 字段
+GET    /api/admin/backfill-mode/last                # 上次回填的元数据
+POST   /api/admin/sync-favorites-to-netease        # 把本地未同步的收藏推到网易云
+```
 
-## 致谢
+## 数据库表
 
-- 灵感参考：**mmguo 风格 AI 电台**
-- 开发辅助：**Claude Code**
-- AI 接口：**Anthropic-compatible API**
-- 音乐能力：**网易云音乐 API**
+```sql
+favorites(song_id PK, song_name, artist, album, cover_url, added_at)
+play_history(id PK, song_id, song_name, artist, album, cover_url, played_at, mode)
+chat_messages(id PK, role, content, song_cards, created_at)
+playlists(id PK, name, type, created_at)
+playlist_songs(playlist_id, song_id, ..., UNIQUE(playlist_id, song_id))
+preferences(key PK, value)              # current_mood, taste_profile, scheduler_status,
+                                          # backfill_mode_last, theme, volume 等都塞这一张
+```
 
----
+## 开发提示
+
+- **改前端代码**：bump `public/sw.js` 的 `CACHE_NAME`
+- **改了 cron 任务函数**：服务重启后 5 秒会触发 catch-up，不用等整点
+- **AI 模型切换**：只动 `.env` 的 `ANTHROPIC_BASE_URL` + `ANTHROPIC_MODEL`，无须改代码
+- **想看 AI 给的原始 prompt**：把 `console.log(userPrompt)` 加在对应路由的 `messages.create()` 之前
+- **本地 DB 浏览**：`data/claudio.db` 用 DB Browser for SQLite 直接打开
+- **配置 hot-reload**：`config/*.md` 改完不用重启，下次 prompt 拼接时会重新读
 
 ## License
 

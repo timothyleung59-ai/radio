@@ -26,6 +26,16 @@ function addMessage(role, content, extra = '') {
   return msg;
 }
 
+function renderAddAllButton(songs) {
+  if (!songs || songs.length < 2) return '';
+  const songsJson = JSON.stringify(songs).replace(/'/g, '&#39;');
+  return `
+    <div style="display:flex;justify-content:flex-end;margin:6px 0">
+      <button class="add-all-btn" data-songs='${songsJson}' style="height:26px;padding:0 12px;font-size:12px;background:rgba(236,65,65,0.12);color:var(--accent-bright);border:1px solid var(--accent-bright);border-radius:13px;cursor:pointer">＋ 全部加入播放列表（${songs.length} 首）</button>
+    </div>
+  `;
+}
+
 function renderSongCard(song, disabled = false) {
   return `
     <div class="song-card ${disabled ? 'disabled' : ''}" data-song-id="${song.id}">
@@ -145,6 +155,7 @@ async function sendMessage() {
                 }
               }
               if (resolvedSongs.length > 0) {
+                html += renderAddAllButton(resolvedSongs);
                 html += resolvedSongs.map(s => renderSongCard(s)).join('');
                 // 自动加入队列并播放第一首
                 window.player?.addToQueue?.(resolvedSongs);
@@ -224,6 +235,24 @@ async function handleMusicSearch(keyword) {
 }
 
 function bindSongCardButtons() {
+  // 一键全部加入播放列表
+  document.querySelectorAll('.add-all-btn').forEach(btn => {
+    if (btn.dataset.bound) return;
+    btn.dataset.bound = 'true';
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      let songs = [];
+      try { songs = JSON.parse(btn.dataset.songs); } catch {}
+      if (!songs.length) return;
+      window.player?.addToQueue?.(songs);
+      window.showToast?.(`已加入 ${songs.length} 首到播放列表`);
+      burstParticles(e.clientX, e.clientY);
+      btn.textContent = '✓ 已加入';
+      btn.disabled = true;
+      btn.style.opacity = '0.6';
+    });
+  });
+
   document.querySelectorAll('.play-song-btn').forEach(btn => {
     if (btn.dataset.bound) return;
     btn.dataset.bound = 'true';
@@ -264,6 +293,18 @@ chatInput.addEventListener('keydown', (e) => {
   }
 });
 
+// 清除聊天记录
+$('chatClearBtn')?.addEventListener('click', async () => {
+  if (!confirm('清除所有聊天记录？这个操作不可撤销。')) return;
+  try {
+    const r = await server.del('/api/chat/history');
+    chatMessages.innerHTML = '';
+    window.showToast?.(`已清除 ${r.deleted || 0} 条聊天记录`);
+  } catch (e) {
+    window.showToast?.('清除失败：' + e.message);
+  }
+});
+
 // 加载聊天历史
 export async function loadChatHistory() {
   try {
@@ -287,7 +328,10 @@ export async function loadChatHistory() {
           }
           if (songs.length === 0 && parsed.play) songs = parsed.play;
           if (parsed.segue) html += renderVoiceMsg(parsed.segue);
-          if (songs.length > 0) html += songs.map(s => renderSongCard(s)).join('');
+          if (songs.length > 0) {
+            html += renderAddAllButton(songs);
+            html += songs.map(s => renderSongCard(s)).join('');
+          }
           addMessage('assistant', html);
         } else {
           // 纯文本回复
@@ -295,7 +339,9 @@ export async function loadChatHistory() {
           if (msg.song_cards) {
             try {
               const cards = JSON.parse(msg.song_cards);
-              if (cards.length > 0) extra = cards.map(s => renderSongCard(s)).join('');
+              if (cards.length > 0) {
+                extra = renderAddAllButton(cards) + cards.map(s => renderSongCard(s)).join('');
+              }
             } catch {}
           }
           addMessage('assistant', msg.content, extra);

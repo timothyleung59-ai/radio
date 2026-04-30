@@ -381,6 +381,7 @@
   font-size: 12px;
   padding: 0 14px;
 }
+.np-action.liked { color: var(--accent-bright); border-color: var(--accent-bright); }
 
 /* ========== Big flippable cover ========== */
 .cover-container {

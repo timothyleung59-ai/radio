@@ -162,13 +162,52 @@ function updateProgress() {
   progressFill.style.width = dur ? `${(cur/dur)*100}%` : '0%';
 }
 
+// 网易云 likelist 缓存（5 分钟 TTL）+ 本地 favorites 综合判断
+let neteaseLikeCache = { ids: null, fetchedAt: 0 };
+async function getNeteaseLikeIds() {
+  const TTL = 5 * 60 * 1000;
+  if (neteaseLikeCache.ids && (Date.now() - neteaseLikeCache.fetchedAt) < TTL) {
+    return neteaseLikeCache.ids;
+  }
+  try {
+    const r = await fetch('/api/netease/likelist');
+    if (!r.ok) {
+      // 401 / 网易云 cookie 失效就只看本地，不报错
+      neteaseLikeCache = { ids: new Set(), fetchedAt: Date.now() };
+      return neteaseLikeCache.ids;
+    }
+    const data = await r.json();
+    neteaseLikeCache = { ids: new Set((data.ids || []).map(String)), fetchedAt: Date.now() };
+  } catch {
+    neteaseLikeCache = { ids: new Set(), fetchedAt: Date.now() };
+  }
+  return neteaseLikeCache.ids;
+}
+function invalidateLikeCache() { neteaseLikeCache = { ids: null, fetchedAt: 0 }; }
+
 async function checkLiked() {
   if (!currentSong) return;
-  const favs = await server.get('/api/favorites');
-  isLiked = favs.some(f => f.song_id === currentSong.id);
+  const sid = String(currentSong.id);
+  // 先看本地（快），再补查网易云 likelist
+  let liked = false;
+  try {
+    const favs = await server.get('/api/favorites');
+    liked = favs.some(f => String(f.song_id) === sid);
+  } catch {}
+  if (!liked) {
+    const netIds = await getNeteaseLikeIds();
+    if (netIds && netIds.has(sid)) liked = true;
+  }
+  isLiked = liked;
   likeBtn.textContent = isLiked ? '♥' : '♡';
   likeBtn.classList.toggle('liked', isLiked);
   if (miniLikeBtn) miniLikeBtn.textContent = isLiked ? '♥' : '♡';
+  // Now-Playing 页面的 ♡ 收藏 / ♥ 已收藏 按钮
+  const npLikeBtnEl = document.getElementById('npLikeBtn');
+  if (npLikeBtnEl) {
+    npLikeBtnEl.textContent = isLiked ? '♥ 已收藏' : '♡ 收藏';
+    npLikeBtnEl.classList.toggle('liked', isLiked);
+  }
 }
 
 export async function playSong(song) {
@@ -208,15 +247,27 @@ export async function playSong(song) {
   }
 
   currentSong = song;
-  // 同步更新队列中这首歌的真实数据，下次播放不用再搜
-  if (queue[queueIndex] && queue[queueIndex].name === song.name) {
-    queue[queueIndex] = song;
+  // 关键：让 queueIndex 始终指向"正在播的歌"
+  // 旧 bug：addToQueue 后 queueIndex 未跟进，ended → splice 删错了歌 → playNext 又指回刚播完的 → 重复
+  const sid = String(song.id);
+  const foundIdx = queue.findIndex(q => String(q.id) === sid);
+  if (foundIdx >= 0) {
+    queueIndex = foundIdx;
+    // 顺便用最新的真实数据覆盖掉队列里那条（封面 / 时长可能更全）
+    queue[foundIdx] = { ...queue[foundIdx], ...song };
+  } else {
+    // 不在队列里就追加在 queueIndex 后面，并指过去
+    queue.splice(queueIndex + 1, 0, song);
+    queueIndex = queueIndex + 1;
+    updateQueueCount();
   }
   audio.src = url;
   audio.play().catch(() => {});
 
   songTitle.textContent = song.name || '未在播放';
   coverImg.src = song.cover || coverImg.src;
+  // 真正开播 → 退出 preview 状态
+  document.body.classList.remove('preview-mode');
 
   updatePlayButton();
   checkLiked();
@@ -237,6 +288,19 @@ export async function playSong(song) {
 
   // 触发自定义事件（供 visual.js 监听）
   window.dispatchEvent(new CustomEvent('songchange', { detail: song }));
+}
+
+// 在串词期间提前展示下一首的封面/歌名/歌手（不改播放状态）
+// 等 playSong 真正调用时会覆盖（值相同，无视觉跳变）
+export function previewSong(song) {
+  if (!song || !song.name) return;
+  songTitle.textContent = song.name;
+  if (song.cover && coverImg) coverImg.src = song.cover;
+  if (miniTitle) miniTitle.textContent = song.artist || '—';
+  if (miniCover && song.cover) miniCover.src = song.cover;
+  document.body.classList.add('preview-mode');
+  // 给视觉/字幕等监听方一个事件，方便扩展
+  window.dispatchEvent(new CustomEvent('songpreview', { detail: song }));
 }
 
 export function setQueue(songs, startIndex = 0) {
@@ -314,20 +378,39 @@ function toggleRepeat() {
 
 async function toggleLike() {
   if (!currentSong) return;
-  if (isLiked) {
-    await server.del(`/api/favorites/${currentSong.id}`);
-    window.showToast('已取消收藏');
-  } else {
-    await server.post('/api/favorites', {
-      song_id: currentSong.id,
-      song_name: currentSong.name,
-      artist: currentSong.artist,
-      album: currentSong.album || '',
-      cover_url: currentSong.cover || ''
-    });
-    window.showToast('已收藏');
+  // 先乐观更新 UI（避免点了没反应的感觉），异步同步成功后 checkLiked 再校准
+  const willLike = !isLiked;
+  isLiked = willLike;
+  likeBtn.textContent = willLike ? '♥' : '♡';
+  likeBtn.classList.toggle('liked', willLike);
+  if (miniLikeBtn) miniLikeBtn.textContent = willLike ? '♥' : '♡';
+  const npLikeBtnEl = document.getElementById('npLikeBtn');
+  if (npLikeBtnEl) {
+    npLikeBtnEl.textContent = willLike ? '♥ 已收藏' : '♡ 收藏';
+    npLikeBtnEl.classList.toggle('liked', willLike);
   }
-  checkLiked();
+
+  try {
+    if (!willLike) {
+      await server.del(`/api/favorites/${currentSong.id}`);
+      window.showToast('已取消收藏');
+    } else {
+      await server.post('/api/favorites', {
+        song_id: currentSong.id,
+        song_name: currentSong.name,
+        artist: currentSong.artist,
+        album: currentSong.album || '',
+        cover_url: currentSong.cover || ''
+      });
+      window.showToast('已收藏');
+    }
+  } catch (e) {
+    window.showToast('收藏操作失败：' + e.message);
+  }
+  // 网易云 likelist 已经被服务端同步过了，本地缓存作废下次重拉
+  invalidateLikeCache();
+  // 短暂延迟后跟实际状态对齐（防止网易云同步延迟导致显示和真实不一致）
+  setTimeout(() => checkLiked(), 800);
 }
 
 function seekFromEvent(e) {
@@ -522,6 +605,6 @@ export async function restorePlayback() {
 }
 
 // 导出给全局使用
-window.player = { playSong, setQueue, addToQueue, playNext, playPrev, playAt, removeAt, getQueue, getQueueIndex, getCurrentSong: () => currentSong };
+window.player = { playSong, previewSong, setQueue, addToQueue, playNext, playPrev, playAt, removeAt, getQueue, getQueueIndex, getCurrentSong: () => currentSong };
 
 export function getAudioElement() { return audio; }

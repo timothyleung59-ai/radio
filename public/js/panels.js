@@ -24,7 +24,7 @@ function renderSongRow(s, opts = {}) {
       </div>
       ${time ? `<span class="panel-song-time">${time}</span>` : ''}
       <button class="panel-song-play" data-song='${safe}' title="播放">▶</button>
-      <button class="panel-song-add" data-song='${safe}' title="加入队列">+</button>
+      <button class="panel-song-add" data-song='${safe}' title="加入播放列表">+</button>
       ${showDel ? `<button class="panel-song-del" data-id="${id}" title="取消收藏">✕</button>` : ''}
     </div>
   `;
@@ -45,7 +45,7 @@ function bindSongRowActions(scope, refresh) {
       e.stopPropagation();
       const song = JSON.parse(btn.dataset.song);
       window.player?.addToQueue?.([song]);
-      window.showToast(`已加入队列：${song.name}`);
+      window.showToast(`已加入播放列表：${song.name}`);
     });
   });
   scope.querySelectorAll('.panel-song-del').forEach(btn => {
@@ -93,14 +93,17 @@ export async function loadFavorites() {
     html += `<p class="empty-tip" style="color:var(--accent-bright)">网易云收藏加载失败：${netError}<br><small style="color:var(--text-muted)">检查 .env 里的 NETEASE_COOKIE 是否还有效</small></p>`;
   }
 
-  // 渲染本地收藏区块
-  if (localFavs.length > 0) {
+  // 本地收藏 → 跟网易云列表去重（已同步到网易云的不再重复显示）
+  const netIds = new Set((netLikes?.songs || []).map(s => String(s.id)));
+  const localOnly = localFavs.filter(s => !netIds.has(String(s.song_id || s.id)));
+
+  if (localOnly.length > 0) {
     html += `
       <div style="padding:16px 12px 6px;margin-top:12px;border-top:1px solid var(--border-subtle)">
-        <h3 style="font-size:13px;font-weight:600;color:var(--text-muted);letter-spacing:1px">本地收藏 · ${localFavs.length} 首</h3>
+        <h3 style="font-size:13px;font-weight:600;color:var(--text-muted);letter-spacing:1px">本地收藏（未同步）· ${localOnly.length} 首</h3>
       </div>
     `;
-    html += localFavs.map(s => renderSongRow(s, { showDel: true })).join('');
+    html += localOnly.map(s => renderSongRow(s, { showDel: true })).join('');
   }
 
   if (!html) {
@@ -111,8 +114,11 @@ export async function loadFavorites() {
 
   list.innerHTML = html;
   if (countEl) {
-    const total = (netLikes?.songs?.length || 0) + localFavs.length;
-    countEl.textContent = `共 ${total} 首歌曲${netLikes ? `（网易云 ${netLikes.songs.length} + 本地 ${localFavs.length}）` : ''}`;
+    const total = (netLikes?.songs?.length || 0) + localOnly.length;
+    const detail = netLikes
+      ? `（网易云 ${netLikes.songs.length}${localOnly.length ? ` + 本地未同步 ${localOnly.length}` : ''}）`
+      : '';
+    countEl.textContent = `共 ${total} 首歌曲${detail}`;
   }
   bindSongRowActions(list, loadFavorites);
 
@@ -121,7 +127,7 @@ export async function loadFavorites() {
     if (!netLikes?.songs?.length) return;
     window.player?.setQueue?.(netLikes.songs, 0);
     window.player?.playSong?.(netLikes.songs[0]);
-    window.showToast(`已加入 ${netLikes.songs.length} 首到播放队列`);
+    window.showToast(`已加入 ${netLikes.songs.length} 首到播放列表`);
   });
 }
 

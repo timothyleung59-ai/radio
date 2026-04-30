@@ -53,6 +53,8 @@ function renderUi() {
 
 function setRadio(on, modeKey = null, opts = {}) {
   const explicitModeChange = modeKey && (!radioOn || modeKey !== currentMode);
+  // 模式变了 / 关电台 → 之前预取的下一首不再合用，作废（含飞行中）
+  if (!on || explicitModeChange) invalidatePrefetch();
   radioOn = on;
   if (modeKey) {
     currentMode = modeKey;
@@ -199,57 +201,153 @@ async function refreshHabit() {
   }
 }
 
-// ========== 跟踪最近播过的 ==========
+// ========== 跟踪最近播过的 + 启动预取 ==========
 window.addEventListener('songchange', (e) => {
   const s = e.detail;
   if (!s) return;
   recentPlayed = [s, ...recentPlayed.filter(x => x.id !== s.id)].slice(0, 10);
+  // 新歌开始播放 → 任何"基于上一首上下文"的预取（已完成或飞行中）已过期，作废
+  // 然后立即重启预取，下一首在用户随时可能跳歌之前就准备好
+  if (radioOn) {
+    invalidatePrefetch();
+    prefetchNext();
+  }
 });
+
+// ========== 预取下一首（含 TTS 串词音频）==========
+// 一旦当前歌开始播放，就在后台把"下一首 + TTS 串词"都做好，
+// 这样不论用户听完还是中途跳，切歌瞬间都没有等待。
+let prefetched = null;     // { song, intro, ttsUrl, mode }
+let prefetching = false;
+let prefetchGen = 0;       // 代次：失效飞行中的过期预取请求
+
+function clearPrefetch() {
+  if (prefetched?.ttsUrl) {
+    try { URL.revokeObjectURL(prefetched.ttsUrl); } catch {}
+  }
+  prefetched = null;
+}
+
+// 让所有"基于过去状态"的预取（已完成或飞行中）作废
+function invalidatePrefetch() {
+  prefetchGen++;
+  prefetching = false;
+  clearPrefetch();
+}
+
+// 拉下一首歌 + 预合成 TTS（独立逻辑，pickAndPlay 和 prefetch 共用）
+async function fetchNextAndTts(opts = {}) {
+  const currentSong = window.player?.getCurrentSong?.() || null;
+  const data = await server.post('/api/radio/next', {
+    mode: currentMode,
+    currentSong,
+    recent: recentPlayed.map(s => ({ name: s.name, artist: s.artist, id: s.id }))
+  });
+  if (data.error || !data.song) return { error: data.error || 'no song' };
+
+  let ttsUrl = null;
+  if (data.intro && !opts.skipTts) {
+    try {
+      const r = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: data.intro })
+      });
+      if (r.ok) {
+        const blob = await r.blob();
+        ttsUrl = URL.createObjectURL(blob);
+      }
+    } catch (e) {
+      console.warn('[radio] 预合成 TTS 失败，回退到现合成:', e);
+    }
+  }
+  return { song: data.song, intro: data.intro, ttsUrl };
+}
+
+async function prefetchNext() {
+  if (prefetching || prefetched || busy || !radioOn) return;
+  prefetching = true;
+  const myGen = ++prefetchGen;
+  const startMode = currentMode;
+  try {
+    const result = await fetchNextAndTts();
+    // 飞行期间被 invalidatePrefetch 作废 / 模式变了 / 关了电台 → 丢弃结果
+    if (myGen !== prefetchGen || currentMode !== startMode || !radioOn || result.error) {
+      if (result?.ttsUrl) URL.revokeObjectURL(result.ttsUrl);
+      if (result?.error) console.warn('[radio] prefetch failed:', result.error);
+      return;
+    }
+    prefetched = { ...result, mode: startMode };
+    console.log('[radio] 预取完成:', result.song.name, result.ttsUrl ? '(TTS 已就绪)' : '(无 TTS)');
+  } catch (e) {
+    console.warn('[radio] prefetch 异常:', e);
+  } finally {
+    // 仅当本次请求仍是最新代次才把 prefetching 复位
+    // （如果中途被 invalidate 了，prefetching 已被它置 false，新请求可能已发起）
+    if (myGen === prefetchGen) prefetching = false;
+  }
+}
 
 // ========== 拉下一首 ==========
 async function pickAndPlay(opts = {}) {
   if (busy) return;
   busy = true;
 
-  // 提示用户 AI 在思考（避免点了没反应）
+  let next = null;
+  let usedPrefetch = false;
   const loadingToast = setTimeout(() => {
-    window.showToast?.('🎵 AI 正在为你挑歌...');
+    if (!usedPrefetch) window.showToast?.('🎵 AI 正在为你挑歌...');
   }, 600);
 
   try {
-    const currentSong = window.player?.getCurrentSong?.() || null;
-    const data = await server.post('/api/radio/next', {
-      mode: currentMode,
-      currentSong,
-      recent: recentPlayed.map(s => ({ name: s.name, artist: s.artist, id: s.id }))
-    });
+    // 优先使用预取结果（仅当模式没变）
+    if (prefetched && prefetched.mode === currentMode) {
+      next = prefetched;
+      prefetched = null;
+      usedPrefetch = true;
+    } else {
+      // 预取过期/没就绪 → 作废飞行中的旧请求，走现拉
+      invalidatePrefetch();
+      next = await fetchNextAndTts({ skipTts: opts.skipIntro });
+    }
     clearTimeout(loadingToast);
 
-    if (data.error || !data.song) {
-      console.warn('radio/next 失败:', data.error || data);
+    if (next.error) {
+      console.warn('radio/next 失败:', next.error);
       window.showToast?.('AI 推荐失败，电台模式暂停');
       setRadio(false);
       return;
     }
 
-    const { song, intro } = data;
+    const { song, intro, ttsUrl } = next;
+    // 用 addToQueue 追加（不破坏用户手动加进来的队列内容）。
+    // 索引正确性由 player.js 的 playSong 内同步逻辑保证。
     window.player?.addToQueue?.([song]);
 
     // 切模式时 skipIntro=true 立即播放（更快），歌曲间过渡才念串词
     if (intro && window.voice && !opts.skipIntro) {
-      const playNext = () => {
-        window.removeEventListener('voiceEnd', playNext);
+      // 串词一开始播就把"下一首"的封面/歌名/歌手提前显示
+      window.player?.previewSong?.(song);
+      const playNow = () => {
+        window.removeEventListener('voiceEnd', playNow);
         window.player?.playSong?.(song);
       };
-      window.addEventListener('voiceEnd', playNext, { once: true });
-      window.voice.speak(intro);
+      window.addEventListener('voiceEnd', playNow, { once: true });
+      // 有预合成的音频 URL 就直接播；否则现合成
+      if (ttsUrl) {
+        window.voice.speakUrl(ttsUrl);
+      } else {
+        window.voice.speak(intro);
+      }
       setTimeout(() => {
         if (window.player?.getCurrentSong?.()?.id !== song.id) {
-          window.removeEventListener('voiceEnd', playNext);
+          window.removeEventListener('voiceEnd', playNow);
           window.player?.playSong?.(song);
         }
       }, 15000);
     } else {
+      // 跳过串词时，如果还残留了预取的 TTS blob，回收
+      if (ttsUrl) try { URL.revokeObjectURL(ttsUrl); } catch {}
       window.player?.playSong?.(song);
     }
   } catch (e) {
@@ -273,7 +371,6 @@ function attachAudioListener() {
     // 之后如果队列空了 + 还没新歌开始 → 由电台模式拉下一首
     setTimeout(() => {
       const queue = window.player?.getQueue?.() || [];
-      const cur = window.player?.getCurrentSong?.();
       // 队列空 + 当前歌仍是刚结束的那首（说明 player.js 没接上下一首） → 我们接管
       if (queue.length === 0 && audio.paused) {
         pickAndPlay({ skipIntro: false });

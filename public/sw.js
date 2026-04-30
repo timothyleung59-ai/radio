@@ -1,4 +1,4 @@
-const CACHE_NAME = 'claudio-fm-v7-radio-fix';
+const CACHE_NAME = 'claudio-fm-v18-tts-direct';
 const PRECACHE = [
   '/',
   '/css/main.css',

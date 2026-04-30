@@ -71,7 +71,7 @@
           </button>
           <button class="nav-item" data-view="queue">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
-            <span>播放队列</span>
+            <span>播放列表</span>
             <span class="nav-count" id="navQueueCount">0</span>
           </button>
           <button class="nav-item" data-view="config">
@@ -99,6 +99,11 @@
         <div class="topbar-current-mode" id="topbarCurrentMode">
           <!-- 显示当前模式 -->
         </div>
+        <button class="topbar-mood" id="topbarMood" title="电台情绪（点击查看 / 修改）">
+          <span class="topbar-mood-emoji">🎭</span>
+          <span class="topbar-mood-label" id="topbarMoodLabel">情绪：未判断</span>
+          <span class="topbar-mood-source" id="topbarMoodSource"></span>
+        </button>
         <div class="topbar-search">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
           <input id="globalSearch" placeholder="搜索 / 跟 DJ 说话">
@@ -140,7 +145,7 @@
             <div class="np-actions">
               <button class="btn-ghost np-action" id="npLikeBtn">♡ 收藏</button>
               <button class="btn-ghost np-action" id="npDjVoiceBtn">🎙 让 DJ 介绍这首</button>
-              <button class="btn-ghost np-action" id="npLearnBtn">📊 学习这个模式</button>
+              <button class="btn-ghost np-action" id="npLearnBtn">📊 AI 同步当前习惯</button>
               <button class="btn-ghost np-action" id="npEditModeBtn">✎ 编辑当前模式偏好</button>
             </div>
           </div>
@@ -181,13 +186,13 @@
           </div>
         </section>
 
-        <!-- 播放队列 -->
+        <!-- 播放列表 -->
         <section class="view view-queue" data-view="queue">
           <div class="view-header">
-            <h1>播放队列 <span class="view-subtitle" id="queueViewCount"></span></h1>
+            <h1>播放列表 <span class="view-subtitle" id="queueViewCount"></span></h1>
           </div>
           <div class="song-list" id="queueListInline">
-            <p class="empty-tip">队列为空</p>
+            <p class="empty-tip">播放列表为空</p>
           </div>
         </section>
 
@@ -204,6 +209,7 @@
               </div>
               <div class="chat-header-actions">
                 <button class="chat-action-btn" id="djAvatarChat" title="电台信息">电台信息</button>
+                <button class="chat-action-btn" id="chatClearBtn" title="清除所有聊天记录">🗑 清除</button>
               </div>
             </div>
             <div class="chat-messages" id="chatMessages"></div>
@@ -317,25 +323,76 @@
 
   <!-- ========== 弹窗 ========== -->
 
-  <!-- DJ 信息面板 -->
+  <!-- DJ 信息面板（AI 任务总控台） -->
   <div class="panel-overlay" id="djPanel" style="display:none">
-    <div class="panel-content">
+    <div class="panel-content panel-large">
       <div class="panel-header">
-        <h3>Claudio FM 电台</h3>
+        <h3>Claudio FM · AI 状态</h3>
         <button class="panel-close" onclick="document.getElementById('djPanel').style.display='none'">✕</button>
       </div>
       <div class="panel-body">
         <div class="panel-section">
-          <h4>电台简介</h4>
-          <p style="color:var(--text-secondary);font-size:14px;line-height:1.6">
-            Claudio 的个人 AI 电台，根据你的听歌习惯持续推荐。
-          </p>
-        </div>
-        <div class="panel-section">
           <h4>你的音乐品味画像</h4>
-          <div id="tasteProfile" style="color:var(--text-secondary);font-size:14px;line-height:1.6">
+          <div id="tasteProfile" style="color:var(--text-secondary);font-size:14px;line-height:1.7;background:rgba(255,255,255,0.04);border-radius:10px;padding:14px;min-height:60px">
             加载中...
           </div>
+          <div id="tasteProfileMeta" style="font-size:11px;color:var(--text-muted);margin-top:6px"></div>
+        </div>
+        <div class="panel-section">
+          <h4>AI 后台任务</h4>
+          <p class="config-hint" style="margin-bottom:10px">这些任务持续学习你的听歌偏好。点"立即跑一次"可手动触发。</p>
+          <div id="schedulerTasksList"></div>
+        </div>
+        <div class="panel-section">
+          <h4>数据维护</h4>
+          <div style="background:rgba(255,255,255,0.04);border-radius:10px;padding:12px">
+            <div style="font-weight:600;font-size:14px">📋 回填旧历史的模式</div>
+            <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;line-height:1.6">
+              旧播放记录的 <code>mode</code> 字段是 NULL（mode 字段是后加的，电台模式关着的播放也是 NULL），
+              专门模式（work / workout / sleep 等）的 AUTO-LEARN 学不到这些数据。
+              这个工具按"时段 + 工作日"规则给 NULL 行推断 mode，一次性写入。<strong>已有 mode 的不动。</strong>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-top:10px">
+              <span id="backfillLastInfo" style="font-size:11px;color:var(--text-muted)">未跑过</span>
+              <button class="btn-ghost" id="backfillBtn" style="height:26px;padding:0 12px;font-size:12px">立即回填</button>
+            </div>
+            <div id="backfillResult" style="font-size:11px;color:var(--text-muted);margin-top:8px;display:none"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 电台情绪面板 -->
+  <div class="panel-overlay" id="moodPanel" style="display:none">
+    <div class="panel-content">
+      <div class="panel-header">
+        <h3>电台情绪</h3>
+        <button class="panel-close" onclick="document.getElementById('moodPanel').style.display='none'">✕</button>
+      </div>
+      <div class="panel-body">
+        <div class="panel-section">
+          <h4>当前判断</h4>
+          <div id="moodCurrentBox" style="background:rgba(255,255,255,0.04);border-radius:10px;padding:14px;line-height:1.6">
+            <div style="font-size:11px;color:var(--text-muted)">来源</div>
+            <div id="moodSourceText" style="font-size:13px;color:var(--text-secondary);margin-bottom:8px">—</div>
+            <div style="font-size:11px;color:var(--text-muted)">情绪</div>
+            <div id="moodCurrentLabel" style="font-size:18px;font-weight:600;color:var(--accent-bright);margin-bottom:6px">—</div>
+            <div id="moodCurrentMessage" style="font-size:13px;color:var(--text-secondary)">—</div>
+            <div id="moodCurrentExtra" style="font-size:11px;color:var(--text-muted);margin-top:8px"></div>
+          </div>
+        </div>
+        <div class="panel-section">
+          <h4>主动告诉 AI 你现在的情绪</h4>
+          <p class="config-hint" style="margin-bottom:8px">写一句话或几个词，AI 会理解。例如「今天好累不想动」「想冲一下」「有点想哭」。</p>
+          <textarea id="moodInput" rows="3" spellcheck="false" placeholder="一句话或几个词..." style="width:100%;background:rgba(255,255,255,0.05);border:1px solid var(--border-subtle);border-radius:8px;padding:10px;color:var(--text-primary);font-size:14px;resize:vertical"></textarea>
+          <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+            <button class="btn-primary" id="moodSubmitBtn">应用这个情绪</button>
+            <button class="btn-ghost" id="moodRefreshBtn">🔄 让 AI 重新判断</button>
+            <button class="btn-ghost" id="moodClearBtn">清除我的设定 → 自动</button>
+            <span id="moodStatus" style="font-size:11px;color:var(--text-muted);align-self:center"></span>
+          </div>
+          <p class="config-hint" style="margin-top:8px;font-size:11px">优先级：你主动设定 ＞ DJ 聊天上下文 ＞ 最近一小时播放行为。用户设定 4 小时后自动失效。</p>
         </div>
       </div>
     </div>

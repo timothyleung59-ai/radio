@@ -7,3 +7,4 @@ certs/
 public/rootCA.pem
 .claude
 package-lock.json
+test-rid.js
