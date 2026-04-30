@@ -1,0 +1,42 @@
+services:
+  netease:
+    image: binaryify/netease_cloud_music_api:latest
+    container_name: claudio-netease
+    restart: unless-stopped
+    networks:
+      - claudio-net
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3000"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  claudio:
+    build: .
+    image: claudio-fm:latest
+    container_name: claudio-fm
+    restart: unless-stopped
+    depends_on:
+      netease:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      # 容器内地址，覆盖 .env 里的 localhost:3000
+      NETEASE_API: http://netease:3000
+      PORT: "3001"
+      NODE_ENV: production
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+    networks:
+      - claudio-net
+    ports:
+      # host:container — 服务器 8081 访问，也方便后面接 nginx 时改成 127.0.0.1:8081
+      - "8081:3001"
+
+networks:
+  claudio-net:
+    driver: bridge
