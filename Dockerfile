@@ -6,8 +6,8 @@ WORKDIR /app
 # better-sqlite3 需要 native 编译
 RUN apk add --no-cache python3 make g++ libc6-compat
 
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+COPY package.json ./
+RUN npm install --omit=dev --no-audit --no-fund
 
 # ---- 运行阶段：精简镜像 ----
 FROM node:20-alpine
@@ -21,7 +21,7 @@ RUN apk add --no-cache tzdata && \
     apk del tzdata
 
 COPY --from=deps /app/node_modules ./node_modules
-COPY package.json package-lock.json ./
+COPY package.json ./
 COPY server.js tts-bigtts.js ./
 COPY public ./public
 COPY config ./config

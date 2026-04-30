@@ -15,7 +15,6 @@ services:
 
   claudio:
     build: .
-    image: claudio-fm:latest
     container_name: claudio-fm
     restart: unless-stopped
     depends_on:
