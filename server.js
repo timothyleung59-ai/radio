@@ -511,6 +511,38 @@ app.post('/api/auth/logout', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+// ========== 用户偏好（通用 KV，限制 key 白名单防注入）==========
+const ALLOWED_PREF_KEYS = new Set(['intro_length']);
+const PREF_VALUE_MAX = 200; // 简单上限，避免存超大字符串
+
+// GET /api/user-prefs?keys=intro_length,foo  → { intro_length: 'medium', foo: null }
+app.get('/api/user-prefs', (req, res) => {
+  const userId = userIdOf(req);
+  const keysStr = (req.query.keys || '').toString();
+  const keys = keysStr.split(',').map(s => s.trim()).filter(Boolean);
+  if (!keys.length) return res.status(400).json({ error: 'keys 必填，逗号分隔' });
+  const out = {};
+  for (const k of keys) {
+    if (!ALLOWED_PREF_KEYS.has(k)) { out[k] = null; continue; }
+    out[k] = getPref(userId, k);
+  }
+  res.json(out);
+});
+
+// PUT /api/user-prefs  body: { intro_length: 'medium' }
+app.put('/api/user-prefs', (req, res) => {
+  const userId = userIdOf(req);
+  const body = req.body || {};
+  const updated = {};
+  for (const [k, v] of Object.entries(body)) {
+    if (!ALLOWED_PREF_KEYS.has(k)) continue;
+    const value = v === null ? '' : String(v).slice(0, PREF_VALUE_MAX);
+    setPref(userId, k, value);
+    updated[k] = value;
+  }
+  res.json({ ok: true, updated });
+});
+
 // ========== 收藏 API ==========
 app.get('/api/favorites', (req, res) => {
   const uid = userIdOf(req);
@@ -1293,15 +1325,27 @@ app.post('/api/radio/next', async (req, res) => {
     if (recentChat.length) ctx.push(`【最近聊天】\n${recentChat.map(c => `${c.role === 'user' ? '听众' : 'DJ'}: ${c.content.slice(0, 80)}`).join('\n')}`);
     if (userCfg.taste) ctx.push(`【长期品味】\n${userCfg.taste}`);
 
-    const sysPrompt = `你是 Claudio FM 的 AI 电台 DJ。基于下方上下文为听众挑选下一首歌，并给一段串场词。
+    // 介绍长度（用户偏好）
+    const introLength = (getPref(userId, 'intro_length') || 'medium').toLowerCase();
+    const INTRO_SPEC = {
+      off:    null,   // 跳过 LLM 的 intro 字段，直接放歌
+      short:  '15-30 字。一两句点题即可。',
+      medium: '30-60 字。说说选这首的心境或场景。',
+      long:   '60-100 字。可加一两句歌曲背景、艺术家或心境。'
+    };
+    const introSpec = INTRO_SPEC.hasOwnProperty(introLength) ? INTRO_SPEC[introLength] : INTRO_SPEC.medium;
+    const introSchemaText = introSpec === null
+      ? '空字符串（用户关闭了 DJ 串词，直接给空 intro）'
+      : `DJ 串场词（${introSpec}严格按 DJ 说话语调写）`;
+
+    const sysPrompt = `你是 Claudio FM 的 AI 电台 DJ。基于下方上下文为听众挑选下一首歌${introSpec === null ? '（用户关闭了串场词，intro 字段返空字符串即可）' : '，并给一段串场词'}。
 
 【硬规则 - 必须遵守】
 - 严格输出 JSON，不要任何解释/markdown 包裹
 - 只挑 1 首歌
 - 绝对禁止【近期已听】列表里的任何一首（包括翻唱版、Live 版、Remix、不同专辑版本）
 - 选歌必须严格符合【选歌风格】定义的风格基调
-- 串场词必须严格符合【DJ 说话语调】的语气、风格、用词
-- 串场词要像电台主持人在话筒前真说话，不是写稿；不要书面语
+${introSpec === null ? '- intro 字段必须是空字符串 ""（用户关闭了 DJ 串词）' : `- 串场词必须严格符合【DJ 说话语调】的语气、风格、用词\n- 串场词长度：${introSpec}\n- 串场词要像电台主持人在话筒前真说话，不是写稿；不要书面语`}
 - 优先选用网易云上能找到的歌
 
 【多样性 - 重要】
@@ -1314,7 +1358,7 @@ app.post('/api/radio/next', async (req, res) => {
 - 在【喜欢歌曲样本】的艺术家之外，每 5 首推荐里至少 1 首是"探索曲"（相邻风格的新艺术家）。
 
 【输出 schema】
-{"song":{"name":"歌名","artist":"歌手"},"reason":"为何选这首（一句话内）","intro":"DJ 串场词（30-60字，严格按 DJ 说话语调写）"}`;
+{"song":{"name":"歌名","artist":"歌手"},"reason":"为何选这首（一句话内）","intro":"${introSchemaText}"}`;
 
     const userPrompt = ctx.join('\n\n');
 
@@ -1346,10 +1390,15 @@ app.post('/api/radio/next', async (req, res) => {
     const resolved = await resolveSong(parsed.song);
     if (!resolved?.id) return res.status(404).json({ error: '网易云未找到这首歌', song: parsed.song });
 
+    // 用户关 intro 时强制空，无视 LLM
+    const finalIntro = introSpec === null
+      ? ''
+      : (parsed.intro || `下面为你播放${resolved.artist}的《${resolved.name}》，请欣赏。`);
+
     res.json({
       song: { id: resolved.id, name: resolved.name, artist: resolved.artist, album: resolved.album, cover: resolved.cover },
       reason: parsed.reason || '',
-      intro: parsed.intro || `下面为你播放${resolved.artist}的《${resolved.name}》，请欣赏。`
+      intro: finalIntro
     });
   } catch (e) {
     console.error('radio/next 失败:', e);
