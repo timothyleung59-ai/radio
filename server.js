@@ -1941,16 +1941,25 @@ const wss = new WebSocketServer({ server: httpServer, path: '/api/ws/dispatch' }
 wss.on('connection', (ws) => {
   console.log('[ws/dispatch] connected');
   ws.on('message', async (raw) => {
+    const text = raw.toString();
+    console.log('[ws/dispatch] received message:', text.slice(0, 200));
     let payload;
-    try { payload = JSON.parse(raw.toString()); }
-    catch { ws.send(JSON.stringify({ type: 'error', message: 'invalid json' })); return; }
+    try { payload = JSON.parse(text); }
+    catch (e) {
+      console.warn('[ws/dispatch] invalid json:', text.slice(0, 200));
+      ws.send(JSON.stringify({ type: 'error', message: 'invalid json' }));
+      return;
+    }
     const { message, currentSong } = payload;
     if (!message || typeof message !== 'string') {
+      console.warn('[ws/dispatch] missing message field, payload:', payload);
       ws.send(JSON.stringify({ type: 'error', message: 'message field required' }));
       return;
     }
+    console.log('[ws/dispatch] handling message:', message.slice(0, 80));
     try {
       await handleDispatchWs(ws, message, currentSong || null);
+      console.log('[ws/dispatch] done for message:', message.slice(0, 40));
     } catch (e) {
       console.error('[ws/dispatch] handler error:', e);
       try { ws.send(JSON.stringify({ type: 'error', message: e.message })); } catch (_) {}
