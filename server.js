@@ -1911,23 +1911,143 @@ app.post('/api/scheduler/trigger/:task', async (req, res) => {
   res.json({ ok: true, task: req.params.task, message: '已在后台触发，状态变化看 /api/scheduler/status' });
 });
 
+const http = require('http');
 const https = require('https');
+const { WebSocketServer } = require('ws');
 
 const certDir = path.join(__dirname, 'certs');
 const hasCerts = fs.existsSync(path.join(certDir, 'cert.pem'));
 
+let httpServer;
 if (hasCerts) {
-  const server = https.createServer({
+  httpServer = https.createServer({
     cert: fs.readFileSync(path.join(certDir, 'cert.pem')),
     key: fs.readFileSync(path.join(certDir, 'key.pem'))
   }, app);
-  server.listen(PORT, () => {
-    console.log(`Claudio FM 服务已启动: https://localhost:${PORT}`);
-  });
 } else {
-  app.listen(PORT, () => {
-    console.log(`Claudio FM 服务已启动: http://localhost:${PORT}`);
+  httpServer = http.createServer(app);
+}
+
+// ========== WebSocket dispatch（鸿蒙客户端走这个，跟现有 SSE 并行） ==========
+// 协议：
+//   client → { type: 'msg', message: string, currentSong?: Song }
+//   server →
+//     { type: 'text', text }                  // 流式 token
+//     { type: 'command', ... }                // 快捷指令
+//     { type: 'music_search', keyword }       // 直接搜
+//     { type: 'done', parsed, songCards }     // 完成
+//     { type: 'error', message }              // 错误
+const wss = new WebSocketServer({ server: httpServer, path: '/api/ws/dispatch' });
+wss.on('connection', (ws) => {
+  console.log('[ws/dispatch] connected');
+  ws.on('message', async (raw) => {
+    let payload;
+    try { payload = JSON.parse(raw.toString()); }
+    catch { ws.send(JSON.stringify({ type: 'error', message: 'invalid json' })); return; }
+    const { message, currentSong } = payload;
+    if (!message || typeof message !== 'string') {
+      ws.send(JSON.stringify({ type: 'error', message: 'message field required' }));
+      return;
+    }
+    try {
+      await handleDispatchWs(ws, message, currentSong || null);
+    } catch (e) {
+      console.error('[ws/dispatch] handler error:', e);
+      try { ws.send(JSON.stringify({ type: 'error', message: e.message })); } catch (_) {}
+    }
+  });
+  ws.on('close', () => console.log('[ws/dispatch] closed'));
+  ws.on('error', (err) => console.error('[ws/dispatch] error:', err));
+});
+
+// 复用 /api/dispatch 的全部逻辑，emit 改成 ws.send
+async function handleDispatchWs(ws, message, currentSong) {
+  const send = (obj) => { try { ws.send(JSON.stringify(obj)); } catch (_) {} };
+
+  // 精确指令
+  if (exactCommands[message]) {
+    send({ type: 'command', ...exactCommands[message]() });
+    send({ type: 'done', parsed: null, songCards: [] });
+    return;
+  }
+  // 包含式指令
+  for (const [keyword, handler] of Object.entries(simpleCommands)) {
+    if (message.includes(keyword)) {
+      send({ type: 'command', ...handler() });
+      send({ type: 'done', parsed: null, songCards: [] });
+      return;
+    }
+  }
+  // 音乐搜索
+  if (message.startsWith('搜索') || (message.startsWith('播放') && message.length > 2)) {
+    const keyword = message.replace(/^(搜索|播放)/, '').trim();
+    if (keyword) {
+      send({ type: 'music_search', keyword });
+      send({ type: 'done', parsed: null, songCards: [] });
+      return;
+    }
+  }
+
+  // 默认走 Claude 流式
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });
+  const history = db.prepare('SELECT * FROM chat_messages ORDER BY id DESC LIMIT 20').all().reverse();
+  const messages = history.map(h => ({ role: h.role, content: h.content }));
+  messages.push({ role: 'user', content: message });
+  const systemPrompt = buildSystemPrompt(currentSong, history);
+
+  const stream = await anthropic.messages.stream({
+    model: process.env.ANTHROPIC_MODEL,
+    max_tokens: 4096,
+    system: systemPrompt,
+    messages
+  });
+
+  let fullContent = '';
+  await new Promise((resolve, reject) => {
+    stream.on('text', (text) => {
+      fullContent += text;
+      send({ type: 'text', text });
+    });
+    stream.on('end', async () => {
+      try {
+        // 落库 user
+        db.prepare('INSERT INTO chat_messages (role, content) VALUES (?, ?)').run('user', message);
+        // 解析
+        let parsed = null;
+        try { parsed = JSON.parse(fullContent); }
+        catch { parsed = { say: fullContent, reason: '', play: [], segue: '', memory: [] }; }
+        // memory 写入
+        if (Array.isArray(parsed.memory) && parsed.memory.length > 0) {
+          const allowed = { taste: 'taste.md', routines: 'routines.md', moodrules: 'moodrules.md' };
+          for (const m of parsed.memory) {
+            if (m.file && m.add && allowed[m.file]) {
+              fs.appendFileSync(path.join(__dirname, 'config', allowed[m.file]), `\n- ${m.add.trim()}`, 'utf-8');
+            }
+          }
+          loadConfigFiles();
+        }
+        // 歌曲卡片
+        const rawSongs = parsed.play || [];
+        const songCards = rawSongs.length > 0 ? await Promise.all(rawSongs.map(s => resolveSong(s))) : [];
+        // 落库 assistant
+        db.prepare('INSERT INTO chat_messages (role, content, song_cards) VALUES (?, ?, ?)').run('assistant', fullContent, JSON.stringify(songCards));
+        send({ type: 'done', parsed, songCards });
+        resolve();
+      } catch (e) {
+        send({ type: 'error', message: e.message });
+        reject(e);
+      }
+    });
+    stream.on('error', (err) => {
+      send({ type: 'error', message: err.message });
+      reject(err);
+    });
   });
 }
+
+httpServer.listen(PORT, () => {
+  console.log(`Claudio FM 服务已启动: ${hasCerts ? 'https' : 'http'}://localhost:${PORT}`);
+  console.log(`WebSocket dispatch:    ${hasCerts ? 'wss' : 'ws'}://localhost:${PORT}/api/ws/dispatch`);
+});
 
 module.exports = { app, db };
