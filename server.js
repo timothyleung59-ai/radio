@@ -126,8 +126,9 @@ const upsertPref = db.prepare('INSERT OR IGNORE INTO preferences (key, value) VA
 upsertPref.run('theme', 'dark');
 upsertPref.run('volume', '0.8');
 
-// 插入默认播放状态
-db.prepare('INSERT OR IGNORE INTO playback_state (id) VALUES (1)').run();
+// 旧版本占位（保留是因为如果是全新数据库，schema 还是 id PK，要等 migration 改）
+// migration 会把它改成 user_id PK；这里用 try 包住兼容两种状态
+try { db.prepare('INSERT OR IGNORE INTO playback_state (id) VALUES (1)').run(); } catch (_) { /* 已是 user_id 形态 */ }
 
 // ========== 多用户：users + sessions + 现有表加 user_id ==========
 // 设计：user_id=1 是"原始用户"，存量数据全部归他。新用户扫码登录后分配新 id。
@@ -274,6 +275,70 @@ function requireAuth(req, res, next) {
 
 app.use(attachUser);
 
+// ========== 多用户辅助函数（Phase B 大量复用） ==========
+
+// 取当前请求归属的 user_id；无 token 回退到 1（保留现有 web 客户端的单用户行为）
+function userIdOf(req) {
+  return req.userId || 1;
+}
+
+// 取某用户的 netease cookie；没绑过用 .env 里的 fallback
+function getUserCookie(userId) {
+  if (!userId || userId === 1) {
+    const u = db.prepare('SELECT cookie FROM users WHERE id = 1').get();
+    if (u && u.cookie) return u.cookie;
+    return NETEASE_COOKIE; // .env 里那个老值，最后兜底
+  }
+  const u = db.prepare('SELECT cookie FROM users WHERE id = ?').get(userId);
+  return (u && u.cookie) ? u.cookie : NETEASE_COOKIE;
+}
+
+// 同 neteaseUrl，但用指定 userId 的 cookie
+function neteaseUrlForUser(userId, path, params = {}) {
+  const cookie = getUserCookie(userId);
+  return neteaseUrlWithCookie(path, params, cookie);
+}
+
+// 用户级 prefs：先查用户自己的，再回退全局（user_id=0）
+function getPref(userId, key) {
+  let row = db.prepare('SELECT value FROM preferences WHERE user_id=? AND key=?').get(userId, key);
+  if (!row) row = db.prepare('SELECT value FROM preferences WHERE user_id=0 AND key=?').get(key);
+  return row ? row.value : null;
+}
+function setPref(userId, key, value) {
+  db.prepare('INSERT OR REPLACE INTO preferences (user_id, key, value) VALUES (?, ?, ?)').run(userId, key, value);
+}
+
+// 用户级配置文件：先看 config/users/<id>/<file>，没有就回退 config/<file>
+function userConfigDir(userId) {
+  const dir = path.join(__dirname, 'config', 'users', String(userId));
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+function readUserConfigOrGlobal(userId, file) {
+  // file 可以是 "taste.md" 或 "modes/work.md" 这种相对路径
+  const userPath = path.join(userConfigDir(userId), file);
+  if (fs.existsSync(userPath)) return fs.readFileSync(userPath, 'utf-8');
+  const globalPath = path.join(__dirname, 'config', file);
+  if (fs.existsSync(globalPath)) return fs.readFileSync(globalPath, 'utf-8');
+  return '';
+}
+function writeUserConfig(userId, file, content) {
+  const userPath = path.join(userConfigDir(userId), file);
+  fs.mkdirSync(path.dirname(userPath), { recursive: true });
+  fs.writeFileSync(userPath, content, 'utf-8');
+}
+
+// 取一个用户的 config 视图（agent 永远全局；taste/routines/moodrules 优先用户专属）
+function getUserConfig(userId) {
+  return {
+    agent: configCache.agent || '',                                // 全局 agent.md
+    taste: readUserConfigOrGlobal(userId, 'taste.md'),
+    routines: readUserConfigOrGlobal(userId, 'routines.md'),
+    moodrules: readUserConfigOrGlobal(userId, 'moodrules.md')
+  };
+}
+
 console.log('数据库初始化完成');
 
 // 健康检查
@@ -390,17 +455,18 @@ app.post('/api/auth/logout', requireAuth, (req, res) => {
 
 // ========== 收藏 API ==========
 app.get('/api/favorites', (req, res) => {
-  const rows = db.prepare('SELECT * FROM favorites ORDER BY added_at DESC').all();
+  const uid = userIdOf(req);
+  const rows = db.prepare('SELECT * FROM favorites WHERE user_id=? ORDER BY added_at DESC').all(uid);
   res.json(rows);
 });
 
-// 同步收藏到网易云「我喜欢的音乐」（需要 cookie）
-// like=true → 加入；like=false → 移除
-async function syncNeteaseLike(songId, like) {
-  if (!NETEASE_COOKIE) return { ok: false, error: 'no_cookie' };
+// 同步收藏到网易云（用该用户自己的 cookie）
+async function syncNeteaseLike(userId, songId, like) {
   if (!songId) return { ok: false, error: 'no_song_id' };
+  const cookie = getUserCookie(userId);
+  if (!cookie) return { ok: false, error: 'no_cookie' };
   try {
-    const url = neteaseUrl('/like', { id: songId, like: String(like), timestamp: Date.now() });
+    const url = neteaseUrlWithCookie('/like', { id: songId, like: String(like), timestamp: Date.now() }, cookie);
     const r = await fetch(url);
     const data = await r.json();
     if (data.code === 200) return { ok: true };
@@ -411,25 +477,27 @@ async function syncNeteaseLike(songId, like) {
 }
 
 app.post('/api/favorites', async (req, res) => {
+  const uid = userIdOf(req);
   const { song_id, song_name, artist, album, cover_url } = req.body;
-  db.prepare('INSERT OR REPLACE INTO favorites (song_id, song_name, artist, album, cover_url) VALUES (?, ?, ?, ?, ?)')
-    .run(song_id, song_name, artist, album, cover_url);
-  // 同步到网易云（失败也不阻塞本地收藏）
-  const sync = await syncNeteaseLike(song_id, true);
+  db.prepare('INSERT OR REPLACE INTO favorites (user_id, song_id, song_name, artist, album, cover_url) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(uid, song_id, song_name, artist, album, cover_url);
+  const sync = await syncNeteaseLike(uid, song_id, true);
   res.json({ ok: true, netease: sync });
 });
 
 app.delete('/api/favorites/:songId', async (req, res) => {
+  const uid = userIdOf(req);
   const songId = req.params.songId;
-  db.prepare('DELETE FROM favorites WHERE song_id = ?').run(songId);
-  const sync = await syncNeteaseLike(songId, false);
+  db.prepare('DELETE FROM favorites WHERE user_id=? AND song_id=?').run(uid, songId);
+  const sync = await syncNeteaseLike(uid, songId, false);
   res.json({ ok: true, netease: sync });
 });
 
 // ========== 播放历史 API ==========
 app.get('/api/history', (req, res) => {
+  const uid = userIdOf(req);
   const limit = parseInt(req.query.limit) || 50;
-  const rows = db.prepare('SELECT * FROM play_history ORDER BY played_at DESC LIMIT ?').all(limit);
+  const rows = db.prepare('SELECT * FROM play_history WHERE user_id=? ORDER BY played_at DESC LIMIT ?').all(uid, limit);
   res.json(rows);
 });
 
@@ -437,34 +505,41 @@ app.get('/api/history', (req, res) => {
 try { db.exec('ALTER TABLE play_history ADD COLUMN mode TEXT'); } catch {}
 
 app.post('/api/history', (req, res) => {
+  const uid = userIdOf(req);
   const { song_id, song_name, artist, album, cover_url, mode } = req.body;
-  db.prepare('INSERT INTO play_history (song_id, song_name, artist, album, cover_url, mode) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(song_id, song_name, artist, album, cover_url, mode || null);
+  db.prepare('INSERT INTO play_history (user_id, song_id, song_name, artist, album, cover_url, mode) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    .run(uid, song_id, song_name, artist, album, cover_url, mode || null);
   res.json({ ok: true });
 });
 
 // ========== 歌单 API ==========
 app.get('/api/playlists', (req, res) => {
-  const rows = db.prepare('SELECT * FROM playlists ORDER BY created_at DESC').all();
+  const uid = userIdOf(req);
+  const rows = db.prepare('SELECT * FROM playlists WHERE user_id=? ORDER BY created_at DESC').all(uid);
   res.json(rows);
 });
 
 app.post('/api/playlists', (req, res) => {
+  const uid = userIdOf(req);
   const { name, type } = req.body;
-  const result = db.prepare('INSERT INTO playlists (name, type) VALUES (?, ?)').run(name, type || 'user');
+  const result = db.prepare('INSERT INTO playlists (user_id, name, type) VALUES (?, ?, ?)').run(uid, name, type || 'user');
   res.json({ ok: true, id: result.lastInsertRowid });
 });
 
 app.get('/api/playlists/:id', (req, res) => {
-  const playlist = db.prepare('SELECT * FROM playlists WHERE id = ?').get(req.params.id);
-  if (!playlist) return res.status(404).json({ error: '歌单不存在' });
-  const songs = db.prepare('SELECT * FROM playlist_songs WHERE playlist_id = ? ORDER BY sort_order').all(req.params.id);
+  const uid = userIdOf(req);
+  const playlist = db.prepare('SELECT * FROM playlists WHERE id=? AND user_id=?').get(req.params.id, uid);
+  if (!playlist) return res.status(404).json({ error: '歌单不存在或无权访问' });
+  const songs = db.prepare('SELECT * FROM playlist_songs WHERE playlist_id=? ORDER BY sort_order').all(req.params.id);
   res.json({ ...playlist, songs });
 });
 
 app.post('/api/playlists/:id/songs', (req, res) => {
+  const uid = userIdOf(req);
+  const owner = db.prepare('SELECT user_id FROM playlists WHERE id=?').get(req.params.id);
+  if (!owner || owner.user_id !== uid) return res.status(403).json({ error: '无权操作' });
   const { song_id, song_name, artist, album, cover_url } = req.body;
-  const maxOrder = db.prepare('SELECT MAX(sort_order) as m FROM playlist_songs WHERE playlist_id = ?').get(req.params.id);
+  const maxOrder = db.prepare('SELECT MAX(sort_order) as m FROM playlist_songs WHERE playlist_id=?').get(req.params.id);
   const order = (maxOrder?.m || 0) + 1;
   db.prepare('INSERT OR REPLACE INTO playlist_songs (playlist_id, song_id, song_name, artist, album, cover_url, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)')
     .run(req.params.id, song_id, song_name, artist, album, cover_url, order);
@@ -472,24 +547,36 @@ app.post('/api/playlists/:id/songs', (req, res) => {
 });
 
 app.delete('/api/playlists/:id/songs/:songId', (req, res) => {
-  db.prepare('DELETE FROM playlist_songs WHERE playlist_id = ? AND song_id = ?')
+  const uid = userIdOf(req);
+  const owner = db.prepare('SELECT user_id FROM playlists WHERE id=?').get(req.params.id);
+  if (!owner || owner.user_id !== uid) return res.status(403).json({ error: '无权操作' });
+  db.prepare('DELETE FROM playlist_songs WHERE playlist_id=? AND song_id=?')
     .run(req.params.id, req.params.songId);
   res.json({ ok: true });
 });
 
 // ========== 偏好 API ==========
+// 全局 prefs（user_id=0）覆盖 + 当前用户的（user_id=req.userId）合并；用户的覆盖全局
 app.get('/api/preferences', (req, res) => {
-  const rows = db.prepare('SELECT * FROM preferences').all();
+  const uid = userIdOf(req);
+  const globalRows = db.prepare('SELECT key, value FROM preferences WHERE user_id=0').all();
+  const userRows = db.prepare('SELECT key, value FROM preferences WHERE user_id=?').all(uid);
   const prefs = {};
-  rows.forEach(r => prefs[r.key] = r.value);
+  globalRows.forEach(r => prefs[r.key] = r.value);
+  userRows.forEach(r => prefs[r.key] = r.value);  // 用户的优先
   res.json(prefs);
 });
 
+// 哪些 key 算全局（跨用户共享，写入 user_id=0），其它都按当前用户写
+const GLOBAL_PREF_KEYS = new Set(['theme', 'volume', 'scheduler_status', 'backfill_mode_last']);
+
 app.put('/api/preferences', (req, res) => {
-  const stmt = db.prepare('INSERT OR REPLACE INTO preferences (key, value) VALUES (?, ?)');
+  const uid = userIdOf(req);
+  const stmt = db.prepare('INSERT OR REPLACE INTO preferences (user_id, key, value) VALUES (?, ?, ?)');
   const tx = db.transaction((obj) => {
     for (const [k, v] of Object.entries(obj)) {
-      stmt.run(k, typeof v === 'string' ? v : JSON.stringify(v));
+      const targetUid = GLOBAL_PREF_KEYS.has(k) ? 0 : uid;
+      stmt.run(targetUid, k, typeof v === 'string' ? v : JSON.stringify(v));
     }
   });
   tx(req.body);
@@ -498,31 +585,36 @@ app.put('/api/preferences', (req, res) => {
 
 // ========== 播放状态 API ==========
 app.get('/api/playback-state', (req, res) => {
-  const state = db.prepare('SELECT * FROM playback_state WHERE id = 1').get();
-  res.json(state);
+  const uid = userIdOf(req);
+  const state = db.prepare('SELECT * FROM playback_state WHERE user_id=?').get(uid);
+  res.json(state || null);
 });
 
 app.put('/api/playback-state', (req, res) => {
+  const uid = userIdOf(req);
   const { current_song_id, current_song_name, current_song_artist, current_song_album, current_song_cover, progress_seconds, queue_song_ids, queue_index, play_mode } = req.body;
+  // upsert：第一次该用户没行就 INSERT
+  db.prepare('INSERT OR IGNORE INTO playback_state (user_id) VALUES (?)').run(uid);
   db.prepare(`UPDATE playback_state SET
     current_song_id=?, current_song_name=?, current_song_artist=?, current_song_album=?, current_song_cover=?,
     progress_seconds=?, queue_song_ids=?, queue_index=?, play_mode=?, updated_at=CURRENT_TIMESTAMP
-    WHERE id=1`)
+    WHERE user_id=?`)
     .run(current_song_id, current_song_name, current_song_artist, current_song_album, current_song_cover,
-      progress_seconds, JSON.stringify(queue_song_ids), queue_index, play_mode);
+      progress_seconds, JSON.stringify(queue_song_ids), queue_index, play_mode, uid);
   res.json({ ok: true });
 });
 
 // ========== 聊天历史 API ==========
 app.get('/api/chat/history', (req, res) => {
+  const uid = userIdOf(req);
   const limit = parseInt(req.query.limit) || 100;
-  const rows = db.prepare('SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?').all(limit);
+  const rows = db.prepare('SELECT * FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT ?').all(uid, limit);
   res.json(rows.reverse());
 });
 
-// 清空聊天历史
 app.delete('/api/chat/history', (req, res) => {
-  const result = db.prepare('DELETE FROM chat_messages').run();
+  const uid = userIdOf(req);
+  const result = db.prepare('DELETE FROM chat_messages WHERE user_id=?').run(uid);
   res.json({ ok: true, deleted: result.changes });
 });
 
@@ -671,30 +763,44 @@ const MODE_MD_DEFAULTS = {
 
 const ALLOWED_MODE_KEYS = Object.keys(MODE_MD_DEFAULTS);
 
-function modeFile(key) {
+function modeFileGlobal(key) {
   return path.join(modesDir, `${key}.md`);
 }
+function modeFileUser(userId, key) {
+  return path.join(userConfigDir(userId), 'modes', `${key}.md`);
+}
 
-function ensureModeMd(key) {
-  const fp = modeFile(key);
+function ensureModeMdGlobal(key) {
+  const fp = modeFileGlobal(key);
   if (!fs.existsSync(fp)) {
     fs.writeFileSync(fp, MODE_MD_DEFAULTS[key] || `# ${key}\n`, 'utf-8');
   }
   return fp;
 }
 
-function readModeMd(key) {
-  const fp = ensureModeMd(key);
-  return fs.readFileSync(fp, 'utf-8');
+// 读模式 md：优先用户专属版，回退全局默认
+function readModeMd(userId, key) {
+  const userPath = modeFileUser(userId, key);
+  if (fs.existsSync(userPath)) return fs.readFileSync(userPath, 'utf-8');
+  const globalPath = ensureModeMdGlobal(key);
+  return fs.readFileSync(globalPath, 'utf-8');
 }
 
-// 启动时确保所有模式 MD 都存在
-ALLOWED_MODE_KEYS.forEach(ensureModeMd);
+// 写模式 md：永远写到用户专属目录（保留全局默认不变）
+function writeModeMdUser(userId, key, content) {
+  const userPath = modeFileUser(userId, key);
+  fs.mkdirSync(path.dirname(userPath), { recursive: true });
+  fs.writeFileSync(userPath, content, 'utf-8');
+}
+
+// 启动时确保所有模式 MD 全局默认都存在
+ALLOWED_MODE_KEYS.forEach(ensureModeMdGlobal);
 
 app.get('/api/radio/modes/:key/md', (req, res) => {
   const key = req.params.key;
   if (!ALLOWED_MODE_KEYS.includes(key)) return res.status(400).json({ error: '未知模式' });
-  res.json({ key, content: readModeMd(key) });
+  const uid = userIdOf(req);
+  res.json({ key, content: readModeMd(uid, key) });
 });
 
 app.put('/api/radio/modes/:key/md', (req, res) => {
@@ -702,7 +808,8 @@ app.put('/api/radio/modes/:key/md', (req, res) => {
   if (!ALLOWED_MODE_KEYS.includes(key)) return res.status(400).json({ error: '未知模式' });
   const content = req.body?.content;
   if (typeof content !== 'string') return res.status(400).json({ error: 'content 必须是字符串' });
-  fs.writeFileSync(modeFile(key), content, 'utf-8');
+  const uid = userIdOf(req);
+  writeModeMdUser(uid, key, content);
   res.json({ ok: true });
 });
 
@@ -951,11 +1058,13 @@ app.get('/api/netease/playlist/detail', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 当前登录用户信息（用 .env 里的 NETEASE_COOKIE 鉴权）
+// 当前登录用户信息（用当前请求 user 的 cookie）
 app.get('/api/netease/login-status', async (req, res) => {
   try {
-    if (!NETEASE_COOKIE) return res.json({ logged_in: false });
-    const r = await fetch(neteaseUrl('/login/status'));
+    const uid = userIdOf(req);
+    const cookie = getUserCookie(uid);
+    if (!cookie) return res.json({ logged_in: false });
+    const r = await fetch(neteaseUrlWithCookie('/login/status', {}, cookie));
     const data = await r.json();
     const profile = data.data?.profile;
     if (!profile) return res.json({ logged_in: false });
@@ -1022,14 +1131,14 @@ function isWorkday(d = new Date()) {
   return day >= 1 && day <= 5;
 }
 
-// 拉同时段听歌习惯切片：返回最常听的歌/艺术家
-function buildHabitSnapshot() {
+// 拉同时段听歌习惯切片：返回最常听的歌/艺术家（按用户 scope）
+function buildHabitSnapshot(userId) {
   const now = new Date();
   const bucket = getTimeBucket(now);
   const workday = isWorkday(now);
 
-  // 拉所有历史，client 端筛同时段（SQLite 没好的方式直接 group by hour）
-  const all = db.prepare("SELECT song_name, artist, played_at FROM play_history ORDER BY id DESC LIMIT 1000").all();
+  // 拉该用户所有历史，client 端筛同时段
+  const all = db.prepare("SELECT song_name, artist, played_at FROM play_history WHERE user_id=? ORDER BY id DESC LIMIT 1000").all(userId);
   const sameBucket = [];
   const sameBucketSameDay = [];
   for (const r of all) {
@@ -1063,7 +1172,7 @@ function buildHabitSnapshot() {
 }
 
 app.get('/api/radio/habit-snapshot', (req, res) => {
-  res.json(buildHabitSnapshot());
+  res.json(buildHabitSnapshot(userIdOf(req)));
 });
 
 app.get('/api/radio/modes', (req, res) => {
@@ -1072,27 +1181,23 @@ app.get('/api/radio/modes', (req, res) => {
 
 app.post('/api/radio/next', async (req, res) => {
   try {
+    const userId = userIdOf(req);
     const recentPlayed = req.body?.recent || [];
     const currentSong = req.body?.currentSong || null;
     const seedTags = (req.body?.tags || []).slice(0, 5);
     const modeKey = req.body?.mode && RADIO_MODES[req.body.mode] ? req.body.mode : 'default';
     const mode = RADIO_MODES[modeKey];
 
-    // 从聊天历史拉最近 6 条做上下文
-    const recentChat = db.prepare('SELECT role, content FROM chat_messages ORDER BY id DESC LIMIT 6').all().reverse();
-    // 从喜欢的歌（本地）拉一些样本
-    const localFavs = db.prepare('SELECT song_name, artist FROM favorites ORDER BY RANDOM() LIMIT 8').all();
-    // 当前心情（按优先级链解析：用户输入 > 聊天上下文 > 播放行为）
+    // 该用户的聊天 / 收藏 / 历史
+    const recentChat = db.prepare('SELECT role, content FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT 6').all(userId).reverse();
+    const localFavs = db.prepare('SELECT song_name, artist FROM favorites WHERE user_id=? ORDER BY RANDOM() LIMIT 8').all(userId);
     let curMood = null;
-    try { curMood = await resolveMood(); } catch {}
+    try { curMood = await resolveMood({ userId }); } catch {}
 
-    // 习惯切片（默认模式重点用，其他模式作辅助）
-    const habit = buildHabitSnapshot();
+    const habit = buildHabitSnapshot(userId);
 
-    // 「绝对禁止」列表：服务端从 play_history 抓最近 50 + 客户端送来的 recent 合并去重。
-    // 目的：刷新页面/跨会话也能避免重复推荐，AI 不再卡在那几首"安全选择"上。
-    const dbRecent = db.prepare(`SELECT song_name, artist FROM play_history ORDER BY id DESC LIMIT 50`).all();
-    const noRepeatMap = new Map(); // 'name|artist' → 显示标签
+    const dbRecent = db.prepare(`SELECT song_name, artist FROM play_history WHERE user_id=? ORDER BY id DESC LIMIT 50`).all(userId);
+    const noRepeatMap = new Map();
     for (const r of dbRecent) {
       if (r.song_name) noRepeatMap.set(`${r.song_name}|${r.artist || ''}`, `《${r.song_name}》${r.artist || ''}`);
     }
@@ -1100,6 +1205,8 @@ app.post('/api/radio/next', async (req, res) => {
       if (r.name) noRepeatMap.set(`${r.name}|${r.artist || ''}`, `《${r.name}》${r.artist || ''}`);
     }
     const noRepeatLabels = Array.from(noRepeatMap.values());
+
+    const userCfg = getUserConfig(userId);
 
     const ctx = [];
     ctx.push(`【当前模式】${mode.label}`);
@@ -1117,9 +1224,8 @@ app.post('/api/radio/next', async (req, res) => {
       }
     }
 
-    // 模式专属偏好 MD（用户编辑 + AI 自动学习）
     try {
-      const modeMd = readModeMd(modeKey);
+      const modeMd = readModeMd(userId, modeKey);
       if (modeMd?.trim()) ctx.push(`【模式偏好（来自 modes/${modeKey}.md）】\n${modeMd}`);
     } catch {}
 
@@ -1127,7 +1233,7 @@ app.post('/api/radio/next', async (req, res) => {
     if (seedTags.length) ctx.push(`【种子标签】${seedTags.join('、')}`);
     if (curMood?.mood) ctx.push(`【当前电台情绪】${curMood.mood} (${curMood.genre || ''})`);
     if (recentChat.length) ctx.push(`【最近聊天】\n${recentChat.map(c => `${c.role === 'user' ? '听众' : 'DJ'}: ${c.content.slice(0, 80)}`).join('\n')}`);
-    if (configCache.taste) ctx.push(`【长期品味】\n${configCache.taste}`);
+    if (userCfg.taste) ctx.push(`【长期品味】\n${userCfg.taste}`);
 
     const sysPrompt = `你是 Claudio FM 的 AI 电台 DJ。基于下方上下文为听众挑选下一首歌，并给一段串场词。
 
@@ -1196,14 +1302,16 @@ app.post('/api/radio/next', async (req, res) => {
 // ========== AI 给当前歌写一段 DJ 串词（当前歌已在播，不挑新歌）==========
 app.post('/api/dj/intro', async (req, res) => {
   try {
+    const userId = userIdOf(req);
     const song = req.body?.song;
     if (!song?.name) return res.status(400).json({ error: 'song 必填' });
     const modeKey = req.body?.mode && RADIO_MODES[req.body.mode] ? req.body.mode : 'default';
     const mode = RADIO_MODES[modeKey];
 
     let curMood = null;
-    try { curMood = await resolveMood(); } catch {}
-    const habit = buildHabitSnapshot();
+    try { curMood = await resolveMood({ userId }); } catch {}
+    const habit = buildHabitSnapshot(userId);
+    const userCfg = getUserConfig(userId);
 
     const ctx = [];
     ctx.push(`【当前模式】${mode.label}`);
@@ -1211,7 +1319,7 @@ app.post('/api/dj/intro', async (req, res) => {
     ctx.push(`【现在时间】${habit.weekdayType} · ${habit.timeBucket}`);
     ctx.push(`【这首歌】《${song.name}》— ${song.artist || '未知'}${song.album ? ` · ${song.album}` : ''}`);
     if (curMood?.mood) ctx.push(`【当前电台情绪】${curMood.mood} (${curMood.genre || ''})`);
-    if (configCache.taste) ctx.push(`【长期品味】\n${configCache.taste}`);
+    if (userCfg.taste) ctx.push(`【长期品味】\n${userCfg.taste}`);
 
     const sysPrompt = `你是 Claudio FM 的 AI 电台 DJ。听众点了"让 DJ 介绍这首"，请你用一段串场词介绍当前正在播放的这首歌。
 
@@ -1258,15 +1366,15 @@ app.post('/api/dj/intro', async (req, res) => {
 
 const MOOD_TTL = { user: 4 * 3600 * 1000, chat: 30 * 60 * 1000, playback: 30 * 60 * 1000 };
 
-function readStoredMood() {
-  const row = db.prepare("SELECT value FROM preferences WHERE key = 'current_mood'").get();
+function readStoredMood(userId) {
+  const row = db.prepare("SELECT value FROM preferences WHERE user_id=? AND key='current_mood'").get(userId);
   if (!row) return null;
   try { return JSON.parse(row.value); } catch { return null; }
 }
 
-function writeMood(data) {
-  db.prepare('INSERT OR REPLACE INTO preferences (key, value) VALUES (?, ?)')
-    .run('current_mood', JSON.stringify(data));
+function writeMood(userId, data) {
+  db.prepare('INSERT OR REPLACE INTO preferences (user_id, key, value) VALUES (?, ?, ?)')
+    .run(userId, 'current_mood', JSON.stringify(data));
 }
 
 function isMoodFresh(stored) {
@@ -1308,31 +1416,31 @@ const MOOD_SYSTEM_BASE = `你是 Claudio FM 的电台情绪判断器。
 不要任何解释，不要 markdown 包裹。
 情绪标签举例：放松、专注、焦虑、低落、兴奋、疲惫、思乡、想冲、平静、忧郁。`;
 
-async function inferMoodFromUser(input) {
+async function inferMoodFromUser(userId, input) {
   if (!input?.trim()) return null;
+  const cfg = getUserConfig(userId);
   const ctx = [];
   ctx.push(`【用户主动输入】${input.trim()}`);
-  if (configCache.moodrules) ctx.push(`【情绪规则参考】\n${configCache.moodrules}`);
-  if (configCache.taste) ctx.push(`【长期品味参考】\n${configCache.taste}`);
+  if (cfg.moodrules) ctx.push(`【情绪规则参考】\n${cfg.moodrules}`);
+  if (cfg.taste) ctx.push(`【长期品味参考】\n${cfg.taste}`);
   return await callMoodAI(MOOD_SYSTEM_BASE, ctx.join('\n\n'));
 }
 
-async function inferMoodFromChat() {
-  // 最近 30 分钟的聊天
+async function inferMoodFromChat(userId) {
   const cutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
-  const chats = db.prepare(`SELECT role, content, created_at FROM chat_messages WHERE created_at > ? ORDER BY id DESC LIMIT 12`).all(cutoff).reverse();
+  const chats = db.prepare(`SELECT role, content, created_at FROM chat_messages WHERE user_id=? AND created_at > ? ORDER BY id DESC LIMIT 12`).all(userId, cutoff).reverse();
   if (chats.length < 2) return null;
   const dialog = chats.map(c => `${c.role === 'user' ? '听众' : 'DJ'}: ${c.content.slice(0, 120)}`).join('\n');
+  const cfg = getUserConfig(userId);
   const ctx = [`【最近半小时跟 DJ 的对话】\n${dialog}`];
-  if (configCache.moodrules) ctx.push(`【情绪规则参考】\n${configCache.moodrules}`);
+  if (cfg.moodrules) ctx.push(`【情绪规则参考】\n${cfg.moodrules}`);
   return await callMoodAI(MOOD_SYSTEM_BASE + '\n聚焦于从对话内容推断当前情绪。', ctx.join('\n\n'));
 }
 
-async function inferMoodFromPlayback() {
+async function inferMoodFromPlayback(userId) {
   const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-  const plays = db.prepare(`SELECT song_name, artist, played_at FROM play_history WHERE played_at > ? ORDER BY id ASC LIMIT 60`).all(cutoff);
+  const plays = db.prepare(`SELECT song_name, artist, played_at FROM play_history WHERE user_id=? AND played_at > ? ORDER BY id ASC LIMIT 60`).all(userId, cutoff);
   if (plays.length < 2) return null;
-  // 简易跳过判断：上一首跟下一首间隔 < 45s 视为跳过
   let skipped = 0;
   let totalSpan = 0;
   for (let i = 1; i < plays.length; i++) {
@@ -1347,6 +1455,7 @@ async function inferMoodFromPlayback() {
   const topArtists = Object.entries(artistCount).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([a,c])=>`${a}×${c}`);
   const skipRate = plays.length > 1 ? (skipped / (plays.length - 1)) : 0;
 
+  const cfg = getUserConfig(userId);
   const ctx = [
     `【最近一小时播放行为】`,
     `- 总曲目数: ${plays.length}`,
@@ -1354,20 +1463,19 @@ async function inferMoodFromPlayback() {
     `- 听过的艺人 top: ${topArtists.join('、') || '无'}`,
     `- 歌曲列表：${plays.slice(-12).map(p => `《${p.song_name}》${p.artist}`).join('; ')}`
   ];
-  if (configCache.taste) ctx.push(`【长期品味参考】\n${configCache.taste}`);
+  if (cfg.taste) ctx.push(`【长期品味参考】\n${cfg.taste}`);
   return await callMoodAI(MOOD_SYSTEM_BASE + '\n聚焦于从播放行为推断当前情绪：跳过率高=不耐烦/找不到合心意；连续同艺人=沉浸；跨度大=随意听。', ctx.join('\n\n'));
 }
 
-// 主入口：按优先级链解析当前情绪。stored 新鲜 → 直接返回；否则尝试自动推断
-async function resolveMood({ forceRefresh = false } = {}) {
-  const stored = readStoredMood();
+// 主入口：按优先级链解析当前情绪。
+async function resolveMood({ userId = 1, forceRefresh = false } = {}) {
+  const stored = readStoredMood(userId);
   if (!forceRefresh && stored && isMoodFresh(stored)) return stored;
 
-  // 自动推断：先聊天，后播放
-  let inferred = await inferMoodFromChat();
+  let inferred = await inferMoodFromChat(userId);
   let source = 'chat';
   if (!inferred) {
-    inferred = await inferMoodFromPlayback();
+    inferred = await inferMoodFromPlayback(userId);
     source = 'playback';
   }
   if (!inferred) {
@@ -1383,13 +1491,14 @@ async function resolveMood({ forceRefresh = false } = {}) {
 // 用户主动输入设置情绪
 app.post('/api/mood', async (req, res) => {
   try {
+    const userId = userIdOf(req);
     const input = (req.body?.input || '').toString().trim();
     if (!input) return res.status(400).json({ error: 'input 不能为空' });
     if (input.length > 500) return res.status(413).json({ error: 'input 过长' });
-    const inferred = await inferMoodFromUser(input);
+    const inferred = await inferMoodFromUser(userId, input);
     if (!inferred) return res.status(502).json({ error: 'AI 解析失败' });
     const data = { ...inferred, source: 'user', set_at: new Date().toISOString(), user_input: input };
-    writeMood(data);
+    writeMood(userId, data);
     res.json(data);
   } catch (e) {
     console.error('POST /api/mood 失败:', e);
@@ -1397,69 +1506,68 @@ app.post('/api/mood', async (req, res) => {
   }
 });
 
-// 强制重新推断（跳过 user 设定，用于"AI 重判一次"按钮）
 app.post('/api/mood/refresh', async (req, res) => {
   try {
-    const data = await resolveMood({ forceRefresh: true });
+    const userId = userIdOf(req);
+    const data = await resolveMood({ userId, forceRefresh: true });
     res.json(data || { error: '推断失败：无对话或播放数据' });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// 清除用户设定，回退到自动推断
 app.delete('/api/mood', async (req, res) => {
-  const stored = readStoredMood();
-  if (stored?.source === 'user') db.prepare("DELETE FROM preferences WHERE key = 'current_mood'").run();
-  const data = await resolveMood();
+  const userId = userIdOf(req);
+  const stored = readStoredMood(userId);
+  if (stored?.source === 'user') db.prepare("DELETE FROM preferences WHERE user_id=? AND key='current_mood'").run(userId);
+  const data = await resolveMood({ userId });
   res.json(data || null);
 });
 
-// 读取当前情绪（按优先级链解析）
 app.get('/api/mood', async (req, res) => {
   try {
-    const data = await resolveMood();
+    const userId = userIdOf(req);
+    const data = await resolveMood({ userId });
     res.json(data || null);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// 网易云"我喜欢"的歌曲 ID 列表（轻量端点，仅返回 id 数组用于判断收藏状态）
+// 网易云"我喜欢"的歌曲 ID 列表（用当前用户的 cookie）
 app.get('/api/netease/likelist', async (req, res) => {
   try {
-    if (!NETEASE_COOKIE) return res.status(401).json({ error: '未配置 NETEASE_COOKIE' });
-    // 1) 拿 uid
-    const stat = await fetch(neteaseUrl('/login/status')).then(r => r.json());
-    const uid = stat.data?.profile?.userId;
-    if (!uid) return res.status(401).json({ error: 'Cookie 无效或已过期' });
-    // 2) 拉 likelist（返回的 ids 是数字，前端做 String 比较时要 toString）
-    const r = await fetch(neteaseUrl('/likelist', { uid })).then(r => r.json());
+    const reqUid = userIdOf(req);
+    const cookie = getUserCookie(reqUid);
+    if (!cookie) return res.status(401).json({ error: '未登录网易云' });
+    const stat = await fetch(neteaseUrlWithCookie('/login/status', {}, cookie)).then(r => r.json());
+    const neteaseUid = stat.data?.profile?.userId;
+    if (!neteaseUid) return res.status(401).json({ error: 'Cookie 无效或已过期' });
+    const r = await fetch(neteaseUrlWithCookie('/likelist', { uid: neteaseUid }, cookie)).then(r => r.json());
     const ids = (r.ids || []).map(String);
-    res.json({ uid, ids, count: ids.length });
+    res.json({ uid: neteaseUid, ids, count: ids.length });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-// 我喜欢的音乐（自动从用户第一个歌单拉取，最多 300 首）
+// 我喜欢的音乐（用当前用户的 cookie）
 app.get('/api/netease/me/likes', async (req, res) => {
   try {
-    if (!NETEASE_COOKIE) return res.status(401).json({ error: '未配置 NETEASE_COOKIE' });
+    const reqUid = userIdOf(req);
+    const cookie = getUserCookie(reqUid);
+    if (!cookie) return res.status(401).json({ error: '未登录网易云' });
     const limit = Math.min(parseInt(req.query.limit) || 300, 1000);
 
-    // 1) 拿 uid
-    const stat = await fetch(neteaseUrl('/login/status')).then(r => r.json());
-    const uid = stat.data?.profile?.userId;
-    if (!uid) return res.status(401).json({ error: 'Cookie 无效或已过期' });
+    const stat = await fetch(neteaseUrlWithCookie('/login/status', {}, cookie)).then(r => r.json());
+    const neteaseUid = stat.data?.profile?.userId;
+    if (!neteaseUid) return res.status(401).json({ error: 'Cookie 无效或已过期' });
 
-    // 2) 拿用户的歌单列表，第一个总是「我喜欢的音乐」
-    const playlists = await fetch(neteaseUrl('/user/playlist', { uid, limit: 1 })).then(r => r.json());
+    const playlists = await fetch(neteaseUrlWithCookie('/user/playlist', { uid: neteaseUid, limit: 1 }, cookie)).then(r => r.json());
     const myLike = playlists.playlist?.[0];
     if (!myLike) return res.status(404).json({ error: '未找到「我喜欢的音乐」歌单' });
 
-    // 3) 拉这个歌单的全部 track
-    const detail = await fetch(neteaseUrl('/playlist/track/all', { id: myLike.id, limit, offset: 0 })).then(r => r.json());
+    const detail = await fetch(neteaseUrlWithCookie('/playlist/track/all', { id: myLike.id, limit, offset: 0 }, cookie)).then(r => r.json());
     const songs = (detail.songs || []).map(s => ({
       id: String(s.id),
       name: s.name,
@@ -1478,32 +1586,34 @@ app.get('/api/netease/me/likes', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 把网易云「我喜欢的音乐」一次性灌进本地 favorites 表（INSERT OR IGNORE 幂等）。
-// 解决 AI 选歌锚点池太小（之前 favorites 只有几十首）→ 推荐总在 taste.md 那几个艺术家打转的问题。
+// 把网易云「我喜欢」灌进当前用户的本地 favorites 表
 app.post('/api/admin/import-netease-likes', async (req, res) => {
   try {
-    if (!NETEASE_COOKIE) return res.status(401).json({ error: '未配置 NETEASE_COOKIE' });
+    const reqUid = userIdOf(req);
+    const cookie = getUserCookie(reqUid);
+    if (!cookie) return res.status(401).json({ error: '未登录网易云' });
     const limit = Math.min(parseInt(req.body?.limit) || 500, 1000);
 
-    const stat = await fetch(neteaseUrl('/login/status')).then(r => r.json());
-    const uid = stat.data?.profile?.userId;
-    if (!uid) return res.status(401).json({ error: 'Cookie 无效或已过期' });
+    const stat = await fetch(neteaseUrlWithCookie('/login/status', {}, cookie)).then(r => r.json());
+    const neteaseUid = stat.data?.profile?.userId;
+    if (!neteaseUid) return res.status(401).json({ error: 'Cookie 无效或已过期' });
 
-    const playlists = await fetch(neteaseUrl('/user/playlist', { uid, limit: 1 })).then(r => r.json());
+    const playlists = await fetch(neteaseUrlWithCookie('/user/playlist', { uid: neteaseUid, limit: 1 }, cookie)).then(r => r.json());
     const myLike = playlists.playlist?.[0];
     if (!myLike) return res.status(404).json({ error: '未找到「我喜欢的音乐」歌单' });
 
-    const detail = await fetch(neteaseUrl('/playlist/track/all', { id: myLike.id, limit, offset: 0 })).then(r => r.json());
+    const detail = await fetch(neteaseUrlWithCookie('/playlist/track/all', { id: myLike.id, limit, offset: 0 }, cookie)).then(r => r.json());
     const songs = detail.songs || [];
 
     const stmt = db.prepare(`
-      INSERT OR IGNORE INTO favorites (song_id, song_name, artist, album, cover_url)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT OR IGNORE INTO favorites (user_id, song_id, song_name, artist, album, cover_url)
+      VALUES (?, ?, ?, ?, ?, ?)
     `);
     let inserted = 0, skipped = 0;
     const tx = db.transaction((rows) => {
       for (const s of rows) {
         const result = stmt.run(
+          reqUid,
           String(s.id),
           s.name,
           (s.ar || []).map(a => a.name).join('/'),
@@ -1562,12 +1672,13 @@ fs.watch(configDir, (event, filename) => {
   }
 });
 
-function buildSystemPrompt(currentSong, chatHistory) {
+function buildSystemPrompt(userId, currentSong, chatHistory) {
+  const cfg = getUserConfig(userId);
   const parts = [];
-  if (configCache.agent) parts.push(configCache.agent);
-  if (configCache.taste) parts.push(`## 音乐品味\n${configCache.taste}`);
-  if (configCache.routines) parts.push(`## 行为习惯\n${configCache.routines}`);
-  if (configCache.moodrules) parts.push(`## 情绪规则\n${configCache.moodrules}`);
+  if (cfg.agent) parts.push(cfg.agent);
+  if (cfg.taste) parts.push(`## 音乐品味\n${cfg.taste}`);
+  if (cfg.routines) parts.push(`## 行为习惯\n${cfg.routines}`);
+  if (cfg.moodrules) parts.push(`## 情绪规则\n${cfg.moodrules}`);
 
   const now = new Date();
   const weekDays = ['日', '一', '二', '三', '四', '五', '六'];
@@ -1614,22 +1725,32 @@ const exactCommands = {
   '播放': () => ({ action: 'play' }),
 };
 
+// 把 AI 返回的 memory 字段写到对应用户的 taste/routines/moodrules
+function appendUserMemory(userId, memoryArr) {
+  if (!Array.isArray(memoryArr) || memoryArr.length === 0) return;
+  const allowed = { taste: 'taste.md', routines: 'routines.md', moodrules: 'moodrules.md' };
+  for (const m of memoryArr) {
+    if (!m.file || !m.add || !allowed[m.file]) continue;
+    const file = allowed[m.file];
+    const cur = readUserConfigOrGlobal(userId, file);
+    const next = (cur || '') + `\n- ${m.add.trim()}`;
+    writeUserConfig(userId, file, next);
+    console.log(`[memory user=${userId}] 写入 ${file}: ${m.add.trim()}`);
+  }
+}
+
 app.post('/api/dispatch', async (req, res) => {
+  const userId = userIdOf(req);
   const { message, currentSong } = req.body;
 
-  // 精确指令检测
   if (exactCommands[message]) {
     return res.json({ type: 'command', ...exactCommands[message]() });
   }
-
-  // 包含式指令检测
   for (const [keyword, handler] of Object.entries(simpleCommands)) {
     if (message.includes(keyword)) {
       return res.json({ type: 'command', ...handler() });
     }
   }
-
-  // 音乐搜索检测
   if (message.startsWith('搜索') || (message.startsWith('播放') && message.length > 2)) {
     const keyword = message.replace(/^(搜索|播放)/, '').trim();
     if (keyword) {
@@ -1637,20 +1758,12 @@ app.post('/api/dispatch', async (req, res) => {
     }
   }
 
-  // 默认走 Claude
   try {
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });
-
-    // 获取聊天历史
-    const history = db.prepare('SELECT * FROM chat_messages ORDER BY id DESC LIMIT 20').all().reverse();
-
-    const messages = history.map(h => ({
-      role: h.role,
-      content: h.content
-    }));
+    const history = db.prepare('SELECT * FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT 20').all(userId).reverse();
+    const messages = history.map(h => ({ role: h.role, content: h.content }));
     messages.push({ role: 'user', content: message });
-
-    const systemPrompt = buildSystemPrompt(currentSong, history);
+    const systemPrompt = buildSystemPrompt(userId, currentSong, history);
 
     const stream = await anthropic.messages.stream({
       model: process.env.ANTHROPIC_MODEL,
@@ -1670,40 +1783,21 @@ app.post('/api/dispatch', async (req, res) => {
     });
 
     stream.on('end', async () => {
-      // 保存消息
-      db.prepare('INSERT INTO chat_messages (role, content) VALUES (?, ?)').run('user', message);
+      db.prepare('INSERT INTO chat_messages (user_id, role, content) VALUES (?, ?, ?)').run(userId, 'user', message);
 
-      // 尝试解析结构化回复
       let parsed = null;
-      try {
-        parsed = JSON.parse(fullContent);
-      } catch(e) {
-        // 非 JSON 回复，当作纯文本
-        parsed = { say: fullContent, reason: '', play: [], segue: '', memory: [] };
-      }
+      try { parsed = JSON.parse(fullContent); }
+      catch (_) { parsed = { say: fullContent, reason: '', play: [], segue: '', memory: [] }; }
 
-      // 处理 memory 写入
-      if (Array.isArray(parsed.memory) && parsed.memory.length > 0) {
-        console.log(`[memory] AI 返回记忆:`, JSON.stringify(parsed.memory));
-        const allowed = { taste: 'taste.md', routines: 'routines.md', moodrules: 'moodrules.md' };
-        for (const m of parsed.memory) {
-          if (m.file && m.add && allowed[m.file]) {
-            const fp = path.join(__dirname, 'config', allowed[m.file]);
-            fs.appendFileSync(fp, `\n- ${m.add.trim()}`, 'utf-8');
-            console.log(`[memory] 写入 ${allowed[m.file]}: ${m.add.trim()}`);
-          }
-        }
-        loadConfigFiles();
-      }
+      appendUserMemory(userId, parsed.memory);
 
-      // 提取歌曲卡片，并通过网易云搜索补全真实数据
       const rawSongs = parsed.play || [];
       const songCards = rawSongs.length > 0
         ? await Promise.all(rawSongs.map(s => resolveSong(s)))
         : [];
 
-      db.prepare('INSERT INTO chat_messages (role, content, song_cards) VALUES (?, ?, ?)')
-        .run('assistant', fullContent, JSON.stringify(songCards));
+      db.prepare('INSERT INTO chat_messages (user_id, role, content, song_cards) VALUES (?, ?, ?, ?)')
+        .run(userId, 'assistant', fullContent, JSON.stringify(songCards));
 
       res.write(`data: ${JSON.stringify({ type: 'done', parsed, songCards })}\n\n`);
       res.end();
@@ -1714,7 +1808,6 @@ app.post('/api/dispatch', async (req, res) => {
       res.write(`data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`);
       res.end();
     });
-
   } catch (err) {
     console.error('Claude API 错误:', err);
     res.status(500).json({ type: 'error', message: err.message });
@@ -1725,12 +1818,12 @@ app.post('/api/dispatch', async (req, res) => {
 // 状态持久化到 preferences 表，重启不丢
 function loadSchedulerStatus() {
   try {
-    const row = db.prepare("SELECT value FROM preferences WHERE key='scheduler_status'").get();
+    const row = db.prepare("SELECT value FROM preferences WHERE user_id=0 AND key='scheduler_status'").get();
     return row ? JSON.parse(row.value) : null;
   } catch { return null; }
 }
 function saveSchedulerStatus() {
-  db.prepare('INSERT OR REPLACE INTO preferences (key, value) VALUES (?, ?)')
+  db.prepare('INSERT OR REPLACE INTO preferences (user_id, key, value) VALUES (0, ?, ?)')
     .run('scheduler_status', JSON.stringify(schedulerStatus));
 }
 
@@ -1764,19 +1857,20 @@ function markError(taskKey, err) {
 }
 
 // === 任务 1：每日歌单推荐（每日 07:00） ===
-async function runDailyPlaylist() {
+async function runDailyPlaylist(userId = 1) {
   if (schedulerStatus.dailyPlaylist.status === 'running') return { ok: false, error: 'already running' };
-  console.log('[task] daily-playlist start');
+  console.log(`[task] daily-playlist start user=${userId}`);
   markStart('dailyPlaylist');
   try {
     if (!process.env.ANTHROPIC_API_KEY) throw new Error('未配置 AI Key');
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });
-    const history = db.prepare('SELECT * FROM play_history ORDER BY played_at DESC LIMIT 50').all();
+    const history = db.prepare('SELECT * FROM play_history WHERE user_id=? ORDER BY played_at DESC LIMIT 50').all(userId);
+    const cfg = getUserConfig(userId);
 
     const prompt = `根据以下信息，推荐今日歌单（10首歌），严格输出 JSON 数组（无 markdown 包裹）：
 [{"id":"网易云歌曲ID（可空字符串，会自动搜）","name":"歌名","artist":"艺术家","album":"专辑","cover":"封面URL（可空）"}]
 
-${configCache.taste ? '品味偏好：' + configCache.taste : ''}
+${cfg.taste ? '品味偏好：' + cfg.taste : ''}
 最近听歌记录：${history.map(h => h.song_name + ' - ' + h.artist).join(', ')}`;
 
     const response = await anthropic.messages.create({
@@ -1794,7 +1888,7 @@ ${configCache.taste ? '品味偏好：' + configCache.taste : ''}
     }
     if (!Array.isArray(songs) || songs.length === 0) throw new Error('AI 返回无法解析');
 
-    const result = db.prepare('INSERT INTO playlists (name, type) VALUES (?, ?)').run('今日推荐', 'daily');
+    const result = db.prepare('INSERT INTO playlists (user_id, name, type) VALUES (?, ?, ?)').run(userId, '今日推荐', 'daily');
     const playlistId = result.lastInsertRowid;
     // INSERT OR IGNORE 避免 song_id 为空 / 重复时撞 UNIQUE 索引
     const stmt = db.prepare('INSERT OR IGNORE INTO playlist_songs (playlist_id, song_id, song_name, artist, album, cover_url, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)');
@@ -1815,12 +1909,12 @@ ${configCache.taste ? '品味偏好：' + configCache.taste : ''}
 }
 
 // === 任务 2：每小时情绪检查 ===
-async function runMoodCheck() {
+async function runMoodCheck(userId = 1) {
   if (schedulerStatus.moodCheck.status === 'running') return { ok: false, error: 'already running' };
-  console.log('[task] mood-check start');
+  console.log(`[task] mood-check start user=${userId}`);
   markStart('moodCheck');
   try {
-    const data = await resolveMood();
+    const data = await resolveMood({ userId });
     markDone('moodCheck');
     console.log(`[task] mood-check 完成: ${data?.mood || '(无)'} [source=${data?.source || 'none'}]`);
     return { ok: true, mood: data };
@@ -1832,29 +1926,29 @@ async function runMoodCheck() {
 }
 
 // === 任务 4：品味画像生成（每日 07:00 同时跑） ===
-async function runTasteProfile() {
+async function runTasteProfile(userId = 1) {
   if (schedulerStatus.tasteProfile.status === 'running') return { ok: false, error: 'already running' };
-  console.log('[task] taste-profile start');
+  console.log(`[task] taste-profile start user=${userId}`);
   markStart('tasteProfile');
   try {
     if (!process.env.ANTHROPIC_API_KEY) throw new Error('未配置 AI Key');
-    // 输入源：过去 3 天播放 + 最新 10 首收藏 + taste.md
     const cutoff = new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString();
-    const history = db.prepare('SELECT song_name, artist FROM play_history WHERE played_at > ? ORDER BY played_at DESC LIMIT 200').all(cutoff);
-    const favs = db.prepare('SELECT song_name, artist FROM favorites ORDER BY added_at DESC LIMIT 10').all();
+    const history = db.prepare('SELECT song_name, artist FROM play_history WHERE user_id=? AND played_at > ? ORDER BY played_at DESC LIMIT 200').all(userId, cutoff);
+    const favs = db.prepare('SELECT song_name, artist FROM favorites WHERE user_id=? ORDER BY added_at DESC LIMIT 10').all(userId);
+    const cfg = getUserConfig(userId);
 
     const artistCount = {};
     for (const r of history) artistCount[r.artist] = (artistCount[r.artist] || 0) + 1;
     const topArtists = Object.entries(artistCount).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([a, c]) => `${a}(${c})`);
 
     const ctx = [];
-    if (configCache.taste) ctx.push(`【手动写的长期品味（taste.md）】\n${configCache.taste}`);
+    if (cfg.taste) ctx.push(`【手动写的长期品味（taste.md）】\n${cfg.taste}`);
     ctx.push(`【过去 3 天播放总数】${history.length} 首`);
     if (topArtists.length) ctx.push(`【高频艺人（近 3 天）】${topArtists.join(', ')}`);
     if (history.length) ctx.push(`【近 3 天歌曲样本】${history.slice(0, 20).map(h => `《${h.song_name}》${h.artist}`).join('；')}`);
     if (favs.length) ctx.push(`【最新 10 首收藏】${favs.map(f => `《${f.song_name}》${f.artist}`).join('；')}`);
 
-    if (history.length === 0 && favs.length === 0 && !configCache.taste) {
+    if (history.length === 0 && favs.length === 0 && !cfg.taste) {
       throw new Error('数据不足：过去 3 天没播放，没收藏，且 taste.md 也是空');
     }
 
@@ -1888,7 +1982,7 @@ async function runTasteProfile() {
       generated_at: new Date().toISOString(),
       based_on: { history_count: history.length, fav_count: favs.length }
     };
-    db.prepare('INSERT OR REPLACE INTO preferences (key, value) VALUES (?, ?)').run('taste_profile', JSON.stringify(profileData));
+    db.prepare('INSERT OR REPLACE INTO preferences (user_id, key, value) VALUES (?, ?, ?)').run(userId, 'taste_profile', JSON.stringify(profileData));
     markDone('tasteProfile');
     console.log(`[task] taste-profile 完成（${description.length} 字，基于 ${history.length} 历史 + ${favs.length} 收藏）`);
     return { ok: true, description };
@@ -1901,18 +1995,15 @@ async function runTasteProfile() {
 
 // ========== 模式 MD 自动学习 ==========
 // 把 play_history 里每个模式过去 14 天的播放数据 → AI 总结 → 更新 MD 的 AUTO-LEARN 区块
-async function autoLearnModeFromHistory(modeKey) {
+async function autoLearnModeFromHistory(modeKey, userId = 1) {
   if (!ALLOWED_MODE_KEYS.includes(modeKey)) return { ok: false, error: '未知模式' };
   if (!process.env.ANTHROPIC_API_KEY) return { ok: false, error: '未配置 AI Key' };
 
-  // 这个模式过去 14 天的播放
   const cutoff = new Date(Date.now() - 14 * 24 * 3600 * 1000).toISOString();
-  let rows = db.prepare(`SELECT song_name, artist, played_at FROM play_history WHERE mode = ? AND played_at > ? ORDER BY played_at DESC LIMIT 200`).all(modeKey, cutoff);
+  let rows = db.prepare(`SELECT song_name, artist, played_at FROM play_history WHERE user_id=? AND mode=? AND played_at > ? ORDER BY played_at DESC LIMIT 200`).all(userId, modeKey, cutoff);
 
-  // 为 default 模式做兜底：如果严格匹配数据不足，把 mode IS NULL 的旧历史也算进来
-  // （历史数据 mode 字段是后加的，存量记录都是 null）
   if (modeKey === 'default' && rows.length < 3) {
-    rows = db.prepare(`SELECT song_name, artist, played_at FROM play_history WHERE (mode = ? OR mode IS NULL) AND played_at > ? ORDER BY played_at DESC LIMIT 200`).all(modeKey, cutoff);
+    rows = db.prepare(`SELECT song_name, artist, played_at FROM play_history WHERE user_id=? AND (mode=? OR mode IS NULL) AND played_at > ? ORDER BY played_at DESC LIMIT 200`).all(userId, modeKey, cutoff);
   }
 
   if (rows.length < 3) return { ok: false, error: `数据不足（${rows.length} 条），暂不更新` };
@@ -1959,17 +2050,16 @@ async function autoLearnModeFromHistory(modeKey) {
     if (!text) text = blocks.map(b => b.text || '').filter(Boolean).join('').trim();
     if (!text) return { ok: false, error: 'AI 返回为空' };
 
-    // 写入 AUTO-LEARN 区块
-    const fp = ensureModeMd(modeKey);
-    const md = fs.readFileSync(fp, 'utf-8');
+    // 写入 AUTO-LEARN 区块（写到该用户的 mode md，没有就基于全局 default 创建）
+    const md = readModeMd(userId, modeKey);
     const ts = new Date().toLocaleString('zh-CN');
     const learned = `更新于 ${ts}（基于 ${rows.length} 条播放数据）\n\n${text}`;
     const newMd = md.replace(
       /<!-- AUTO-LEARN-START -->[\s\S]*?<!-- AUTO-LEARN-END -->/,
       `<!-- AUTO-LEARN-START -->\n${learned}\n<!-- AUTO-LEARN-END -->`
     );
-    fs.writeFileSync(fp, newMd, 'utf-8');
-    console.log(`[mode-learn] ${modeKey} 已更新（基于 ${rows.length} 条记录）`);
+    writeModeMdUser(userId, modeKey, newMd);
+    console.log(`[mode-learn user=${userId}] ${modeKey} 已更新（基于 ${rows.length} 条记录）`);
     return { ok: true, samples: rows.length, learned: text };
   } catch (e) {
     console.warn(`[mode-learn] ${modeKey} 失败:`, e.message);
@@ -1995,10 +2085,11 @@ function inferModeFromTime(d) {
   }
 }
 
-// 一次性回填工具：把 mode IS NULL 的旧 play_history 按时段推断写入 mode 字段
+// 一次性回填工具：当前用户的 mode IS NULL 旧记录 → 按时段推断
 app.post('/api/admin/backfill-mode', (req, res) => {
   try {
-    const rows = db.prepare("SELECT id, played_at FROM play_history WHERE mode IS NULL").all();
+    const userId = userIdOf(req);
+    const rows = db.prepare("SELECT id, played_at FROM play_history WHERE user_id=? AND mode IS NULL").all(userId);
     if (rows.length === 0) return res.json({ ok: true, updated: 0, breakdown: {}, message: '没有 mode IS NULL 的记录' });
 
     const stmt = db.prepare('UPDATE play_history SET mode = ? WHERE id = ?');
@@ -2014,9 +2105,9 @@ app.post('/api/admin/backfill-mode', (req, res) => {
     });
     tx(rows);
 
-    // 持久记录最近一次回填结果，方便 UI 展示
     const result = { lastRun: new Date().toISOString(), updated: rows.length, breakdown };
-    db.prepare('INSERT OR REPLACE INTO preferences (key, value) VALUES (?, ?)')
+    // backfill_mode_last 是全局 pref（一台设备只回填一次的元数据）
+    db.prepare('INSERT OR REPLACE INTO preferences (user_id, key, value) VALUES (0, ?, ?)')
       .run('backfill_mode_last', JSON.stringify(result));
 
     console.log(`[backfill-mode] 回填 ${rows.length} 条:`, breakdown);
@@ -2027,17 +2118,19 @@ app.post('/api/admin/backfill-mode', (req, res) => {
   }
 });
 
-// 把本地 favorites 里有、但网易云 likelist 里没有的歌一次性同步到网易云
+// 把当前用户本地 favorites 里有、网易云 likelist 里没有的歌一次性同步到网易云
 app.post('/api/admin/sync-favorites-to-netease', async (req, res) => {
   try {
-    if (!NETEASE_COOKIE) return res.status(401).json({ error: '未配置 NETEASE_COOKIE' });
-    const localFavs = db.prepare('SELECT song_id, song_name, artist FROM favorites').all();
+    const reqUid = userIdOf(req);
+    const cookie = getUserCookie(reqUid);
+    if (!cookie) return res.status(401).json({ error: '未登录网易云' });
+    const localFavs = db.prepare('SELECT song_id, song_name, artist FROM favorites WHERE user_id=?').all(reqUid);
     if (localFavs.length === 0) return res.json({ ok: true, total: 0, synced: 0, skipped: 0, failed: 0, message: '本地没有收藏' });
 
-    const stat = await fetch(neteaseUrl('/login/status')).then(r => r.json());
-    const uid = stat.data?.profile?.userId;
-    if (!uid) return res.status(401).json({ error: '网易云 Cookie 无效或已过期' });
-    const lik = await fetch(neteaseUrl('/likelist', { uid })).then(r => r.json());
+    const stat = await fetch(neteaseUrlWithCookie('/login/status', {}, cookie)).then(r => r.json());
+    const neteaseUid = stat.data?.profile?.userId;
+    if (!neteaseUid) return res.status(401).json({ error: '网易云 Cookie 无效或已过期' });
+    const lik = await fetch(neteaseUrlWithCookie('/likelist', { uid: neteaseUid }, cookie)).then(r => r.json());
     const netIds = new Set((lik.ids || []).map(String));
 
     let synced = 0, skipped = 0, failed = 0;
@@ -2045,7 +2138,7 @@ app.post('/api/admin/sync-favorites-to-netease', async (req, res) => {
     for (const f of localFavs) {
       const sid = String(f.song_id);
       if (netIds.has(sid)) { skipped++; continue; }
-      const result = await syncNeteaseLike(sid, true);
+      const result = await syncNeteaseLike(reqUid, sid, true);
       if (result.ok) synced++;
       else { failed++; failures.push({ id: sid, name: f.song_name, error: result.error }); }
     }
@@ -2056,21 +2149,22 @@ app.post('/api/admin/sync-favorites-to-netease', async (req, res) => {
 });
 
 app.get('/api/admin/backfill-mode/last', (req, res) => {
-  const row = db.prepare("SELECT value FROM preferences WHERE key = 'backfill_mode_last'").get();
+  // backfill_mode_last 是全局 pref（user_id=0）
+  const row = db.prepare("SELECT value FROM preferences WHERE user_id=0 AND key='backfill_mode_last'").get();
   if (!row) return res.json(null);
   try { res.json(JSON.parse(row.value)); } catch { res.json(null); }
 });
 
 // === 任务 3：所有模式偏好学习（凌晨 3 点） ===
-async function runModeLearn() {
+async function runModeLearn(userId = 1) {
   if (schedulerStatus.modeLearn.status === 'running') return { ok: false, error: 'already running' };
-  console.log('[task] mode-learn start');
+  console.log(`[task] mode-learn start user=${userId}`);
   markStart('modeLearn');
   schedulerStatus.modeLearn.perMode = schedulerStatus.modeLearn.perMode || {};
   try {
     const results = {};
     for (const k of ALLOWED_MODE_KEYS) {
-      const r = await autoLearnModeFromHistory(k);
+      const r = await autoLearnModeFromHistory(k, userId);
       results[k] = r;
       schedulerStatus.modeLearn.perMode[k] = {
         ok: r.ok, samples: r.samples, error: r.error,
@@ -2124,9 +2218,9 @@ setTimeout(() => {
   }
 }, 5000);
 
-// 手动触发某个模式的学习（保留旧端点）
+// 手动触发某个模式的学习
 app.post('/api/radio/modes/:key/learn', async (req, res) => {
-  const r = await autoLearnModeFromHistory(req.params.key);
+  const r = await autoLearnModeFromHistory(req.params.key, userIdOf(req));
   if (!r.ok) return res.status(400).json(r);
   res.json(r);
 });
@@ -2137,19 +2231,22 @@ app.get('/api/scheduler/status', (req, res) => {
 });
 
 app.get('/api/scheduler/daily-playlist', (req, res) => {
-  const playlist = db.prepare("SELECT * FROM playlists WHERE type = 'daily' ORDER BY created_at DESC LIMIT 1").get();
+  const userId = userIdOf(req);
+  const playlist = db.prepare("SELECT * FROM playlists WHERE user_id=? AND type='daily' ORDER BY created_at DESC LIMIT 1").get(userId);
   if (!playlist) return res.json(null);
   const songs = db.prepare('SELECT * FROM playlist_songs WHERE playlist_id = ? ORDER BY sort_order').all(playlist.id);
   res.json({ ...playlist, songs });
 });
 
 app.get('/api/scheduler/mood', (req, res) => {
-  const mood = db.prepare("SELECT value FROM preferences WHERE key = 'current_mood'").get();
+  const userId = userIdOf(req);
+  const mood = db.prepare("SELECT value FROM preferences WHERE user_id=? AND key='current_mood'").get(userId);
   res.json(mood ? JSON.parse(mood.value) : null);
 });
 
 app.get('/api/scheduler/taste-profile', (req, res) => {
-  const row = db.prepare("SELECT value FROM preferences WHERE key = 'taste_profile'").get();
+  const userId = userIdOf(req);
+  const row = db.prepare("SELECT value FROM preferences WHERE user_id=? AND key='taste_profile'").get(userId);
   if (!row) return res.json(null);
   try { res.json(JSON.parse(row.value)); } catch { res.json({ description: row.value }); }
 });
@@ -2159,7 +2256,8 @@ app.get('/api/scheduler/taste-profile', (req, res) => {
 app.post('/api/scheduler/trigger/:task', async (req, res) => {
   const fn = TASK_REGISTRY[req.params.task];
   if (!fn) return res.status(404).json({ error: `未知任务: ${req.params.task}`, available: Object.keys(TASK_REGISTRY) });
-  fn().catch(e => console.error(`[trigger] ${req.params.task} 异常:`, e));
+  const userId = userIdOf(req);
+  fn(userId).catch(e => console.error(`[trigger] ${req.params.task} 异常:`, e));
   res.json({ ok: true, task: req.params.task, message: '已在后台触发，状态变化看 /api/scheduler/status' });
 });
 
@@ -2190,48 +2288,54 @@ if (hasCerts) {
 //     { type: 'done', parsed, songCards }     // 完成
 //     { type: 'error', message }              // 错误
 const wss = new WebSocketServer({ server: httpServer, path: '/api/ws/dispatch' });
-wss.on('connection', (ws) => {
-  console.log('[ws/dispatch] connected');
+wss.on('connection', (ws, req) => {
+  // 从 URL query 取 token：wss://...?token=X
+  let userId = 1;  // 默认 fallback
+  try {
+    const u = new URL(req.url, 'http://localhost');
+    const token = u.searchParams.get('token');
+    if (token) {
+      const row = db.prepare('SELECT user_id FROM sessions WHERE token = ?').get(token);
+      if (row) userId = row.user_id;
+    }
+  } catch (_) { /* ignore */ }
+  console.log(`[ws/dispatch] connected user=${userId}`);
+
   ws.on('message', async (raw) => {
     const text = raw.toString();
-    console.log('[ws/dispatch] received message:', text.slice(0, 200));
+    console.log(`[ws/dispatch user=${userId}] received:`, text.slice(0, 200));
     let payload;
     try { payload = JSON.parse(text); }
     catch (e) {
-      console.warn('[ws/dispatch] invalid json:', text.slice(0, 200));
       ws.send(JSON.stringify({ type: 'error', message: 'invalid json' }));
       return;
     }
     const { message, currentSong } = payload;
     if (!message || typeof message !== 'string') {
-      console.warn('[ws/dispatch] missing message field, payload:', payload);
       ws.send(JSON.stringify({ type: 'error', message: 'message field required' }));
       return;
     }
-    console.log('[ws/dispatch] handling message:', message.slice(0, 80));
     try {
-      await handleDispatchWs(ws, message, currentSong || null);
-      console.log('[ws/dispatch] done for message:', message.slice(0, 40));
+      await handleDispatchWs(ws, userId, message, currentSong || null);
+      console.log(`[ws/dispatch user=${userId}] done`);
     } catch (e) {
       console.error('[ws/dispatch] handler error:', e);
       try { ws.send(JSON.stringify({ type: 'error', message: e.message })); } catch (_) {}
     }
   });
-  ws.on('close', () => console.log('[ws/dispatch] closed'));
+  ws.on('close', () => console.log(`[ws/dispatch user=${userId}] closed`));
   ws.on('error', (err) => console.error('[ws/dispatch] error:', err));
 });
 
 // 复用 /api/dispatch 的全部逻辑，emit 改成 ws.send
-async function handleDispatchWs(ws, message, currentSong) {
+async function handleDispatchWs(ws, userId, message, currentSong) {
   const send = (obj) => { try { ws.send(JSON.stringify(obj)); } catch (_) {} };
 
-  // 精确指令
   if (exactCommands[message]) {
     send({ type: 'command', ...exactCommands[message]() });
     send({ type: 'done', parsed: null, songCards: [] });
     return;
   }
-  // 包含式指令
   for (const [keyword, handler] of Object.entries(simpleCommands)) {
     if (message.includes(keyword)) {
       send({ type: 'command', ...handler() });
@@ -2239,7 +2343,6 @@ async function handleDispatchWs(ws, message, currentSong) {
       return;
     }
   }
-  // 音乐搜索
   if (message.startsWith('搜索') || (message.startsWith('播放') && message.length > 2)) {
     const keyword = message.replace(/^(搜索|播放)/, '').trim();
     if (keyword) {
@@ -2249,12 +2352,11 @@ async function handleDispatchWs(ws, message, currentSong) {
     }
   }
 
-  // 默认走 Claude 流式
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });
-  const history = db.prepare('SELECT * FROM chat_messages ORDER BY id DESC LIMIT 20').all().reverse();
+  const history = db.prepare('SELECT * FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT 20').all(userId).reverse();
   const messages = history.map(h => ({ role: h.role, content: h.content }));
   messages.push({ role: 'user', content: message });
-  const systemPrompt = buildSystemPrompt(currentSong, history);
+  const systemPrompt = buildSystemPrompt(userId, currentSong, history);
 
   const stream = await anthropic.messages.stream({
     model: process.env.ANTHROPIC_MODEL,
@@ -2271,27 +2373,14 @@ async function handleDispatchWs(ws, message, currentSong) {
     });
     stream.on('end', async () => {
       try {
-        // 落库 user
-        db.prepare('INSERT INTO chat_messages (role, content) VALUES (?, ?)').run('user', message);
-        // 解析
+        db.prepare('INSERT INTO chat_messages (user_id, role, content) VALUES (?, ?, ?)').run(userId, 'user', message);
         let parsed = null;
         try { parsed = JSON.parse(fullContent); }
         catch { parsed = { say: fullContent, reason: '', play: [], segue: '', memory: [] }; }
-        // memory 写入
-        if (Array.isArray(parsed.memory) && parsed.memory.length > 0) {
-          const allowed = { taste: 'taste.md', routines: 'routines.md', moodrules: 'moodrules.md' };
-          for (const m of parsed.memory) {
-            if (m.file && m.add && allowed[m.file]) {
-              fs.appendFileSync(path.join(__dirname, 'config', allowed[m.file]), `\n- ${m.add.trim()}`, 'utf-8');
-            }
-          }
-          loadConfigFiles();
-        }
-        // 歌曲卡片
+        appendUserMemory(userId, parsed.memory);
         const rawSongs = parsed.play || [];
         const songCards = rawSongs.length > 0 ? await Promise.all(rawSongs.map(s => resolveSong(s))) : [];
-        // 落库 assistant
-        db.prepare('INSERT INTO chat_messages (role, content, song_cards) VALUES (?, ?, ?)').run('assistant', fullContent, JSON.stringify(songCards));
+        db.prepare('INSERT INTO chat_messages (user_id, role, content, song_cards) VALUES (?, ?, ?, ?)').run(userId, 'assistant', fullContent, JSON.stringify(songCards));
         send({ type: 'done', parsed, songCards });
         resolve();
       } catch (e) {
