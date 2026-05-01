@@ -2240,13 +2240,44 @@ async function runModeLearn(userId = 1) {
   }
 }
 
-// === Cron 注册 ===
-cron.schedule('0 7 * * *', runDailyPlaylist);  // 每日 07:00 - 每日歌单
-cron.schedule('0 7 * * *', runTasteProfile);   // 每日 07:00 - 品味画像
-cron.schedule('0 * * * *', runMoodCheck);      // 每小时整点 - 情绪检查
-cron.schedule('0 3 * * *', runModeLearn);      // 凌晨 03:00 - 模式偏好学习
+// === 多用户 cron 包装 ===
+// 拿活跃用户 ID 列表（最近 30 天有听过歌的用户 + user 1 兜底）
+function getActiveUserIds() {
+  try {
+    const rows = db.prepare(`
+      SELECT DISTINCT user_id FROM play_history
+      WHERE played_at > datetime('now', '-30 days')
+    `).all();
+    const ids = rows.map(r => r.user_id).filter(id => id != null);
+    if (!ids.includes(1)) ids.unshift(1);
+    return ids;
+  } catch (_) {
+    return [1];
+  }
+}
 
-// === 任务注册表（trigger 端点用） ===
+// 给一个 task 函数（接 userId）包成"对所有活跃用户串行跑一遍"
+function runForAllUsers(label, taskFn) {
+  return async () => {
+    const ids = getActiveUserIds();
+    console.log(`[multi-cron] ${label} 跑 ${ids.length} 个用户: ${ids.join(',')}`);
+    for (const uid of ids) {
+      try {
+        await taskFn(uid);
+      } catch (e) {
+        console.error(`[multi-cron] ${label} user=${uid} 失败:`, e.message);
+      }
+    }
+  };
+}
+
+// === Cron 注册（多用户 loop）===
+cron.schedule('0 7 * * *', runForAllUsers('daily-playlist', runDailyPlaylist));
+cron.schedule('0 7 * * *', runForAllUsers('taste-profile', runTasteProfile));
+cron.schedule('0 * * * *', runForAllUsers('mood-check',    runMoodCheck));
+cron.schedule('0 3 * * *', runForAllUsers('mode-learn',    runModeLearn));
+
+// === 任务注册表（手动 trigger 用，per-user，userId 由 caller 传入） ===
 const TASK_REGISTRY = {
   'daily-playlist': runDailyPlaylist,
   'mood': runMoodCheck,
@@ -2254,7 +2285,7 @@ const TASK_REGISTRY = {
   'taste-profile': runTasteProfile
 };
 
-// === 启动 catch-up：服务启动后 5 秒，把过期的任务补跑一次 ===
+// === 启动 catch-up：服务启动后 5 秒，把过期的任务补跑一次（也按多用户）===
 function shouldCatchup(lastRun, maxAgeMs) {
   if (!lastRun) return true;
   const age = Date.now() - new Date(lastRun).getTime();
@@ -2263,16 +2294,16 @@ function shouldCatchup(lastRun, maxAgeMs) {
 setTimeout(() => {
   console.log('[catchup] 检查启动后是否需要补跑过期任务...');
   if (shouldCatchup(schedulerStatus.moodCheck.lastRun, 60 * 60 * 1000)) {
-    console.log('[catchup] mood'); runMoodCheck().catch(() => {});
+    console.log('[catchup] mood'); runForAllUsers('mood-check', runMoodCheck)().catch(() => {});
   }
   if (shouldCatchup(schedulerStatus.dailyPlaylist.lastRun, 24 * 60 * 60 * 1000)) {
-    console.log('[catchup] daily-playlist'); runDailyPlaylist().catch(() => {});
+    console.log('[catchup] daily-playlist'); runForAllUsers('daily-playlist', runDailyPlaylist)().catch(() => {});
   }
   if (shouldCatchup(schedulerStatus.tasteProfile.lastRun, 24 * 60 * 60 * 1000)) {
-    console.log('[catchup] taste-profile'); runTasteProfile().catch(() => {});
+    console.log('[catchup] taste-profile'); runForAllUsers('taste-profile', runTasteProfile)().catch(() => {});
   }
   if (shouldCatchup(schedulerStatus.modeLearn.lastRun, 24 * 60 * 60 * 1000)) {
-    console.log('[catchup] mode-learn'); runModeLearn().catch(() => {});
+    console.log('[catchup] mode-learn'); runForAllUsers('mode-learn', runModeLearn)().catch(() => {});
   }
 }, 5000);
 
