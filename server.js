@@ -129,11 +129,263 @@ upsertPref.run('volume', '0.8');
 // 插入默认播放状态
 db.prepare('INSERT OR IGNORE INTO playback_state (id) VALUES (1)').run();
 
+// ========== 多用户：users + sessions + 现有表加 user_id ==========
+// 设计：user_id=1 是"原始用户"，存量数据全部归他。新用户扫码登录后分配新 id。
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    netease_uid TEXT UNIQUE,
+    nickname TEXT,
+    avatar TEXT,
+    cookie TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME
+  );
+  CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+`);
+
+// 占位的"原始用户"（id=1），扫码登录后绑到这一行
+db.prepare('INSERT OR IGNORE INTO users (id, nickname) VALUES (1, ?)').run('原始用户');
+
+// helpers ------------
+function tableHasColumn(table, col) {
+  try {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+    return cols.some(c => c.name === col);
+  } catch { return false; }
+}
+
+// play_history / chat_messages / playlists 都加 user_id 列（默认 1）
+const safeAlter = (sql) => { try { db.exec(sql); } catch (_) { /* 已存在 */ } };
+safeAlter('ALTER TABLE play_history ADD COLUMN user_id INTEGER DEFAULT 1');
+safeAlter('ALTER TABLE chat_messages ADD COLUMN user_id INTEGER DEFAULT 1');
+safeAlter('ALTER TABLE playlists ADD COLUMN user_id INTEGER DEFAULT 1');
+
+// favorites: 单字段 PK 改成 (user_id, song_id) 复合 PK，必须重建
+if (!tableHasColumn('favorites', 'user_id')) {
+  console.log('[migration] rebuilding favorites with user_id...');
+  db.exec(`
+    CREATE TABLE favorites_new (
+      user_id INTEGER NOT NULL DEFAULT 1,
+      song_id TEXT NOT NULL,
+      song_name TEXT NOT NULL,
+      artist TEXT,
+      album TEXT,
+      cover_url TEXT,
+      added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, song_id)
+    );
+    INSERT INTO favorites_new (user_id, song_id, song_name, artist, album, cover_url, added_at)
+      SELECT 1, song_id, song_name, artist, album, cover_url, added_at FROM favorites;
+    DROP TABLE favorites;
+    ALTER TABLE favorites_new RENAME TO favorites;
+  `);
+}
+
+// preferences: key PK → (user_id, key) PK，重建。
+// user_id=0 表示全局（theme/volume/scheduler_status 这种），>=1 是用户的（taste_profile/current_mood）。
+if (!tableHasColumn('preferences', 'user_id')) {
+  console.log('[migration] rebuilding preferences with user_id...');
+  // 区分全局/用户级 key 的简单规则：
+  // 全局：theme, volume, scheduler_status, backfill_mode_last
+  // 用户级：current_mood, taste_profile（其它默认全局）
+  db.exec(`
+    CREATE TABLE preferences_new (
+      user_id INTEGER NOT NULL DEFAULT 0,
+      key TEXT NOT NULL,
+      value TEXT NOT NULL,
+      PRIMARY KEY (user_id, key)
+    );
+    INSERT INTO preferences_new (user_id, key, value)
+      SELECT
+        CASE WHEN key IN ('current_mood', 'taste_profile') THEN 1 ELSE 0 END,
+        key, value
+      FROM preferences;
+    DROP TABLE preferences;
+    ALTER TABLE preferences_new RENAME TO preferences;
+  `);
+}
+
+// playback_state: 单行 (id=1) → 每用户一行 (user_id PK)，重建
+if (!tableHasColumn('playback_state', 'user_id')) {
+  console.log('[migration] rebuilding playback_state with user_id...');
+  db.exec(`
+    CREATE TABLE playback_state_new (
+      user_id INTEGER PRIMARY KEY,
+      current_song_id TEXT,
+      current_song_name TEXT,
+      current_song_artist TEXT,
+      current_song_album TEXT,
+      current_song_cover TEXT,
+      progress_seconds REAL DEFAULT 0,
+      queue_song_ids TEXT,
+      queue_index INTEGER DEFAULT 0,
+      play_mode TEXT DEFAULT 'off',
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    INSERT INTO playback_state_new (user_id, current_song_id, current_song_name,
+      current_song_artist, current_song_album, current_song_cover,
+      progress_seconds, queue_song_ids, queue_index, play_mode, updated_at)
+    SELECT 1, current_song_id, current_song_name, current_song_artist,
+      current_song_album, current_song_cover, progress_seconds,
+      queue_song_ids, queue_index, play_mode, updated_at
+    FROM playback_state WHERE id = 1;
+    DROP TABLE playback_state;
+    ALTER TABLE playback_state_new RENAME TO playback_state;
+  `);
+  // 确保 user 1 一定有一行
+  db.prepare('INSERT OR IGNORE INTO playback_state (user_id) VALUES (1)').run();
+}
+
+// ========== 鉴权 middleware ==========
+const crypto = require('crypto');
+function genToken() { return crypto.randomBytes(32).toString('hex'); }
+
+// 软鉴权：有 token 就 attach req.userId；没就不挡（Phase A 兼容存量端点）
+function attachUser(req, res, next) {
+  const auth = req.headers.authorization || '';
+  const m = auth.match(/^Bearer\s+(.+)$/);
+  const token = m ? m[1] : null;
+  if (token) {
+    const row = db.prepare('SELECT user_id FROM sessions WHERE token = ?').get(token);
+    if (row) req.userId = row.user_id;
+  }
+  next();
+}
+
+// 硬鉴权：没 token / 失效就 401
+function requireAuth(req, res, next) {
+  const auth = req.headers.authorization || '';
+  const m = auth.match(/^Bearer\s+(.+)$/);
+  const token = m ? m[1] : null;
+  if (!token) return res.status(401).json({ error: '未登录' });
+  const row = db.prepare('SELECT user_id FROM sessions WHERE token = ?').get(token);
+  if (!row) return res.status(401).json({ error: 'token 无效' });
+  req.userId = row.user_id;
+  next();
+}
+
+app.use(attachUser);
+
 console.log('数据库初始化完成');
 
 // 健康检查
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// ========== 鉴权 / 网易云扫码登录 ==========
+// 1) 拿 unikey
+app.post('/api/auth/qr/key', async (req, res) => {
+  try {
+    const r = await fetch(neteaseUrl('/login/qr/key', { timestamp: Date.now() })).then(r => r.json());
+    const key = r.data?.unikey;
+    if (!key) return res.status(502).json({ error: 'netease 未返回 unikey', detail: r });
+    res.json({ key });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 2) 用 key 拿二维码（base64 data URL）
+app.get('/api/auth/qr/create', async (req, res) => {
+  try {
+    const { key } = req.query;
+    if (!key) return res.status(400).json({ error: 'key required' });
+    const r = await fetch(neteaseUrl('/login/qr/create', { key, qrimg: true, timestamp: Date.now() })).then(r => r.json());
+    res.json({ qrurl: r.data?.qrurl, qrimg: r.data?.qrimg });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 用任意 cookie 调网易云接口的辅助函数（不用 env 那个）
+function neteaseUrlWithCookie(path, params, cookie) {
+  const url = new URL(path, NETEASE_API);
+  for (const [k, v] of Object.entries(params || {})) url.searchParams.set(k, v);
+  if (cookie) url.searchParams.set('cookie', cookie);
+  return url.toString();
+}
+
+// 3) 轮询登录状态。code: 800 二维码失效；801 等待扫码；802 已扫码待确认；803 登录成功
+//    成功时落 user + session，返 token 给客户端
+app.get('/api/auth/qr/check', async (req, res) => {
+  try {
+    const { key } = req.query;
+    if (!key) return res.status(400).json({ error: 'key required' });
+    const r = await fetch(neteaseUrl('/login/qr/check', { key, timestamp: Date.now() })).then(r => r.json());
+    if (r.code !== 803) {
+      return res.json({ status: r.code, message: r.message });
+    }
+
+    // 803：登录成功，cookie 已发回
+    const cookie = r.cookie || '';
+    if (!cookie) return res.status(502).json({ error: '网易云没返 cookie' });
+
+    // 用新 cookie 拉用户信息
+    const profileResp = await fetch(neteaseUrlWithCookie('/login/status', { timestamp: Date.now() }, cookie)).then(r => r.json());
+    const profile = profileResp.data?.profile;
+    if (!profile) return res.status(502).json({ error: '拿不到 profile' });
+    const neteaseUid = String(profile.userId);
+    const nickname = profile.nickname || '';
+    const avatar = profile.avatarUrl || '';
+
+    // upsert user：先看 netease_uid 是否已绑过
+    let userRow = db.prepare('SELECT id FROM users WHERE netease_uid = ?').get(neteaseUid);
+    if (!userRow) {
+      // 没绑过 → 看占位的 user_id=1 是否还空着
+      const u1 = db.prepare('SELECT netease_uid FROM users WHERE id = 1').get();
+      if (u1 && !u1.netease_uid) {
+        // user 1 没绑过任何 netease → 绑给 ta（让现有数据自动归属此账号）
+        db.prepare('UPDATE users SET netease_uid=?, nickname=?, avatar=?, cookie=?, last_seen_at=CURRENT_TIMESTAMP WHERE id=1')
+          .run(neteaseUid, nickname, avatar, cookie);
+        userRow = { id: 1 };
+      } else {
+        // 创新用户
+        const ins = db.prepare('INSERT INTO users (netease_uid, nickname, avatar, cookie) VALUES (?, ?, ?, ?)')
+          .run(neteaseUid, nickname, avatar, cookie);
+        userRow = { id: ins.lastInsertRowid };
+        // 给新用户一行 playback_state
+        db.prepare('INSERT OR IGNORE INTO playback_state (user_id) VALUES (?)').run(userRow.id);
+      }
+    } else {
+      // 已绑过 → 刷新 cookie + nickname + avatar
+      db.prepare('UPDATE users SET cookie=?, nickname=?, avatar=?, last_seen_at=CURRENT_TIMESTAMP WHERE id=?')
+        .run(cookie, nickname, avatar, userRow.id);
+    }
+
+    const token = genToken();
+    db.prepare(`INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, datetime('now', '+30 days'))`)
+      .run(token, userRow.id);
+
+    res.json({
+      status: 803,
+      token,
+      user_id: userRow.id,
+      netease_uid: neteaseUid,
+      nickname,
+      avatar
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// 4) 当前身份
+app.get('/api/auth/me', requireAuth, (req, res) => {
+  const u = db.prepare('SELECT id, netease_uid, nickname, avatar, created_at, last_seen_at FROM users WHERE id=?').get(req.userId);
+  if (!u) return res.status(404).json({ error: 'user not found' });
+  res.json(u);
+});
+
+// 5) 登出（撤销当前 token）
+app.post('/api/auth/logout', requireAuth, (req, res) => {
+  const auth = req.headers.authorization || '';
+  const m = auth.match(/^Bearer\s+(.+)$/);
+  const token = m ? m[1] : null;
+  if (token) db.prepare('DELETE FROM sessions WHERE token=?').run(token);
+  res.json({ ok: true });
 });
 
 // ========== 收藏 API ==========
