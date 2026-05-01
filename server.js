@@ -347,10 +347,14 @@ app.get('/api/health', (req, res) => {
 });
 
 // ========== 鉴权 / 网易云扫码登录 ==========
+// 网易云对第三方 API 有反爬：所有 qr 调用都带固定 realIP，让网易云认为
+// 整个流程在同一 IP 完成，跳过 "设备环境异常" 拦截。
+const NETEASE_REAL_IP = process.env.NETEASE_REAL_IP || '116.25.146.177';
+
 // 1) 拿 unikey
 app.post('/api/auth/qr/key', async (req, res) => {
   try {
-    const r = await fetch(neteaseUrl('/login/qr/key', { timestamp: Date.now() })).then(r => r.json());
+    const r = await fetch(neteaseUrl('/login/qr/key', { timestamp: Date.now(), realIP: NETEASE_REAL_IP })).then(r => r.json());
     const key = r.data?.unikey;
     if (!key) return res.status(502).json({ error: 'netease 未返回 unikey', detail: r });
     res.json({ key });
@@ -362,7 +366,7 @@ app.get('/api/auth/qr/create', async (req, res) => {
   try {
     const { key } = req.query;
     if (!key) return res.status(400).json({ error: 'key required' });
-    const r = await fetch(neteaseUrl('/login/qr/create', { key, qrimg: true, timestamp: Date.now() })).then(r => r.json());
+    const r = await fetch(neteaseUrl('/login/qr/create', { key, qrimg: true, timestamp: Date.now(), realIP: NETEASE_REAL_IP })).then(r => r.json());
     res.json({ qrurl: r.data?.qrurl, qrimg: r.data?.qrimg });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -381,7 +385,7 @@ app.get('/api/auth/qr/check', async (req, res) => {
   try {
     const { key } = req.query;
     if (!key) return res.status(400).json({ error: 'key required' });
-    const r = await fetch(neteaseUrl('/login/qr/check', { key, timestamp: Date.now() })).then(r => r.json());
+    const r = await fetch(neteaseUrl('/login/qr/check', { key, timestamp: Date.now(), realIP: NETEASE_REAL_IP })).then(r => r.json());
     if (r.code !== 803) {
       return res.json({ status: r.code, message: r.message });
     }
@@ -391,7 +395,7 @@ app.get('/api/auth/qr/check', async (req, res) => {
     if (!cookie) return res.status(502).json({ error: '网易云没返 cookie' });
 
     // 用新 cookie 拉用户信息
-    const profileResp = await fetch(neteaseUrlWithCookie('/login/status', { timestamp: Date.now() }, cookie)).then(r => r.json());
+    const profileResp = await fetch(neteaseUrlWithCookie('/login/status', { timestamp: Date.now(), realIP: NETEASE_REAL_IP }, cookie)).then(r => r.json());
     const profile = profileResp.data?.profile;
     if (!profile) return res.status(502).json({ error: '拿不到 profile' });
     const neteaseUid = String(profile.userId);
@@ -437,7 +441,61 @@ app.get('/api/auth/qr/check', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// 4) 当前身份
+// 4) 用 WebView 登录后抓到的 cookie 直接换 token
+//    body: { cookie: "MUSIC_U=...; __csrf=...; ..." 或者只有 MUSIC_U 段也行 }
+//    跟 qr/check 803 分支同一套创 user/session 流程
+app.post('/api/auth/cookie', async (req, res) => {
+  try {
+    const cookie = (req.body?.cookie || '').toString().trim();
+    if (!cookie) return res.status(400).json({ error: 'cookie required' });
+    if (!cookie.includes('MUSIC_U=')) return res.status(400).json({ error: 'cookie 里没有 MUSIC_U 字段' });
+
+    // 用这个 cookie 拉用户信息验证有效性
+    const profileResp = await fetch(neteaseUrlWithCookie('/login/status', { timestamp: Date.now() }, cookie)).then(r => r.json());
+    const profile = profileResp.data?.profile;
+    if (!profile) return res.status(401).json({ error: 'cookie 无效或已过期' });
+    const neteaseUid = String(profile.userId);
+    const nickname = profile.nickname || '';
+    const avatar = profile.avatarUrl || '';
+
+    // upsert user：跟 qr/check 一样的逻辑
+    let userRow = db.prepare('SELECT id FROM users WHERE netease_uid = ?').get(neteaseUid);
+    if (!userRow) {
+      const u1 = db.prepare('SELECT netease_uid FROM users WHERE id = 1').get();
+      if (u1 && !u1.netease_uid) {
+        db.prepare('UPDATE users SET netease_uid=?, nickname=?, avatar=?, cookie=?, last_seen_at=CURRENT_TIMESTAMP WHERE id=1')
+          .run(neteaseUid, nickname, avatar, cookie);
+        userRow = { id: 1 };
+      } else {
+        const ins = db.prepare('INSERT INTO users (netease_uid, nickname, avatar, cookie) VALUES (?, ?, ?, ?)')
+          .run(neteaseUid, nickname, avatar, cookie);
+        userRow = { id: ins.lastInsertRowid };
+        db.prepare('INSERT OR IGNORE INTO playback_state (user_id) VALUES (?)').run(userRow.id);
+      }
+    } else {
+      db.prepare('UPDATE users SET cookie=?, nickname=?, avatar=?, last_seen_at=CURRENT_TIMESTAMP WHERE id=?')
+        .run(cookie, nickname, avatar, userRow.id);
+    }
+
+    const token = genToken();
+    db.prepare(`INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, datetime('now', '+30 days'))`)
+      .run(token, userRow.id);
+
+    res.json({
+      ok: true,
+      token,
+      user_id: userRow.id,
+      netease_uid: neteaseUid,
+      nickname,
+      avatar
+    });
+  } catch (e) {
+    console.error('[auth/cookie] 失败:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// 5) 当前身份
 app.get('/api/auth/me', requireAuth, (req, res) => {
   const u = db.prepare('SELECT id, netease_uid, nickname, avatar, created_at, last_seen_at FROM users WHERE id=?').get(req.userId);
   if (!u) return res.status(404).json({ error: 'user not found' });
