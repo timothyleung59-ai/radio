@@ -593,13 +593,34 @@ app.get('/api/history', (req, res) => {
 
 // 兼容旧表：尝试加 mode 列（已存在则忽略）
 try { db.exec('ALTER TABLE play_history ADD COLUMN mode TEXT'); } catch {}
+// 听歌评分：0 = 跳过 / 没听满 1 分钟，1 = 听了 ≥1 分钟，2 = 听完整首
+try { db.exec('ALTER TABLE play_history ADD COLUMN score INTEGER DEFAULT 0'); } catch {}
 
+// 同一首歌 10 分钟内只保留一条记录，score 取 max（避免重复污染）
 app.post('/api/history', (req, res) => {
   const uid = userIdOf(req);
   const { song_id, song_name, artist, album, cover_url, mode } = req.body;
-  db.prepare('INSERT INTO play_history (user_id, song_id, song_name, artist, album, cover_url, mode) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    .run(uid, song_id, song_name, artist, album, cover_url, mode || null);
-  res.json({ ok: true });
+  const newScore = Math.max(0, Math.min(2, parseInt(req.body.score, 10) || 0));
+
+  // 找同一首 10 分钟内的最新一条
+  const recent = db.prepare(`
+    SELECT id, score FROM play_history
+    WHERE user_id=? AND song_id=? AND played_at > datetime('now', '-10 minutes')
+    ORDER BY id DESC LIMIT 1
+  `).get(uid, song_id);
+
+  if (recent) {
+    if (newScore > (recent.score || 0)) {
+      db.prepare('UPDATE play_history SET score = ? WHERE id = ?').run(newScore, recent.id);
+    }
+    return res.json({ ok: true, id: recent.id, score: Math.max(newScore, recent.score || 0), deduped: true });
+  }
+
+  const r = db.prepare(`
+    INSERT INTO play_history (user_id, song_id, song_name, artist, album, cover_url, mode, score)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(uid, song_id, song_name, artist, album, cover_url, mode || null, newScore);
+  res.json({ ok: true, id: r.lastInsertRowid, score: newScore });
 });
 
 // ========== 歌单 API ==========
@@ -1227,8 +1248,8 @@ function buildHabitSnapshot(userId) {
   const bucket = getTimeBucket(now);
   const workday = isWorkday(now);
 
-  // 拉该用户所有历史，client 端筛同时段
-  const all = db.prepare("SELECT song_name, artist, played_at FROM play_history WHERE user_id=? ORDER BY id DESC LIMIT 1000").all(userId);
+  // 拉该用户的"有效"历史（score>=1，过滤掉跳过的歌），client 端筛同时段
+  const all = db.prepare("SELECT song_name, artist, played_at FROM play_history WHERE user_id=? AND COALESCE(score,0) >= 1 ORDER BY id DESC LIMIT 1000").all(userId);
   const sameBucket = [];
   const sameBucketSameDay = [];
   for (const r of all) {
