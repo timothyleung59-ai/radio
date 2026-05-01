@@ -1992,7 +1992,7 @@ async function runDailyPlaylist(userId = 1) {
   try {
     if (!process.env.ANTHROPIC_API_KEY) throw new Error('未配置 AI Key');
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });
-    const history = db.prepare('SELECT * FROM play_history WHERE user_id=? ORDER BY played_at DESC LIMIT 50').all(userId);
+    const history = db.prepare('SELECT * FROM play_history WHERE user_id=? AND COALESCE(score,0) >= 1 ORDER BY played_at DESC LIMIT 50').all(userId);
     const cfg = getUserConfig(userId);
 
     const prompt = `根据以下信息，推荐今日歌单（10首歌），严格输出 JSON 数组（无 markdown 包裹）：
@@ -2128,10 +2128,11 @@ async function autoLearnModeFromHistory(modeKey, userId = 1) {
   if (!process.env.ANTHROPIC_API_KEY) return { ok: false, error: '未配置 AI Key' };
 
   const cutoff = new Date(Date.now() - 14 * 24 * 3600 * 1000).toISOString();
-  let rows = db.prepare(`SELECT song_name, artist, played_at FROM play_history WHERE user_id=? AND mode=? AND played_at > ? ORDER BY played_at DESC LIMIT 200`).all(userId, modeKey, cutoff);
+  // 只看真听过的（score>=1），跳过的歌不影响模式偏好
+  let rows = db.prepare(`SELECT song_name, artist, played_at FROM play_history WHERE user_id=? AND mode=? AND played_at > ? AND COALESCE(score,0) >= 1 ORDER BY played_at DESC LIMIT 200`).all(userId, modeKey, cutoff);
 
   if (modeKey === 'default' && rows.length < 3) {
-    rows = db.prepare(`SELECT song_name, artist, played_at FROM play_history WHERE user_id=? AND (mode=? OR mode IS NULL) AND played_at > ? ORDER BY played_at DESC LIMIT 200`).all(userId, modeKey, cutoff);
+    rows = db.prepare(`SELECT song_name, artist, played_at FROM play_history WHERE user_id=? AND (mode=? OR mode IS NULL) AND played_at > ? AND COALESCE(score,0) >= 1 ORDER BY played_at DESC LIMIT 200`).all(userId, modeKey, cutoff);
   }
 
   if (rows.length < 3) return { ok: false, error: `数据不足（${rows.length} 条），暂不更新` };
