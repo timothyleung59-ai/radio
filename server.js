@@ -1264,6 +1264,7 @@ app.post('/api/radio/next', async (req, res) => {
     const userId = userIdOf(req);
     const recentPlayed = req.body?.recent || [];
     const currentSong = req.body?.currentSong || null;
+    const recentIntros = (req.body?.recentIntros || []).slice(0, 5);
     const seedTags = (req.body?.tags || []).slice(0, 5);
     const modeKey = req.body?.mode && RADIO_MODES[req.body.mode] ? req.body.mode : 'default';
     const mode = RADIO_MODES[modeKey];
@@ -1296,8 +1297,12 @@ app.post('/api/radio/next', async (req, res) => {
     ctx.push(`【选歌风格】${mode.style}`);
     ctx.push(`【DJ 说话语调】${mode.patterTone}`);
     ctx.push(`【现在时间】${habit.weekdayType} · ${habit.timeBucket}`);
-    if (currentSong) ctx.push(`【当前播放】《${currentSong.name}》— ${currentSong.artist}`);
+    if (currentSong) ctx.push(`【上一首听众听到的歌（你写的串词要基于这首做承接）】《${currentSong.name}》— ${currentSong.artist}`);
     if (noRepeatLabels.length) ctx.push(`【近期已听 — 绝对禁止从这里选任何一首】\n${noRepeatLabels.join('; ')}`);
+    if (recentIntros.length) {
+      const opens = recentIntros.map(s => '"' + String(s).slice(0, 40).trim() + '..."').join('  /  ');
+      ctx.push(`【最近 ${recentIntros.length} 段串词的开头（绝对禁止再用同一引子起头）】\n${opens}`);
+    }
 
     if (modeKey === 'default') {
       if (habit.sample.length > 0) {
@@ -1341,8 +1346,13 @@ app.post('/api/radio/next', async (req, res) => {
 - 只挑 1 首歌
 - 绝对禁止【近期已听】列表里的任何一首（包括翻唱版、Live 版、Remix、不同专辑版本）
 - 选歌必须严格符合【选歌风格】定义的风格基调
-${introSpec === null ? '- intro 字段必须是空字符串 ""（用户关闭了 DJ 串词）' : `- 串场词必须严格符合【DJ 说话语调】的语气、风格、用词\n- 串场词长度：${introSpec}\n- 串场词要像电台主持人在话筒前真说话，不是写稿；不要书面语`}
+${introSpec === null ? '- intro 字段必须是空字符串 ""（用户关闭了 DJ 串词）' : `- 串场词必须严格符合【DJ 说话语调】的语气、风格、用词\n- 串场词长度：${introSpec}\n- 串场词要像电台主持人在话筒前真说话，不是写稿；不要书面语\n- 串场词必须基于【上一首听众听到的歌】做承接（点评 / 关联 / 转折），不要凭空开始`}
 - 优先选用网易云上能找到的歌
+
+【串场词写法 - 每段都要变着花来】
+- 严禁所有串词都用同一个时段意象起头（例如"午后阳光""夜深了""清晨的"），即使现在确实是那个时段
+- 看【最近串词开头】列出的开法，**坚决换一个完全不同的切入角度**——可以从歌手 / 歌词意象 / 某段乐器 / 某次跟听众的对话 / 上一首和这一首的对比 / 一个反问 / 一个意外联想 切入
+- 同一段对话/同一个 session 里的串词风格要像同一个 DJ 在自然变换话题，不是模板化复读
 
 【多样性 - 重要】
 - 不要总聚焦在【长期品味】里反复出现的少数艺术家。在符合风格基调的前提下，主动拓宽。
