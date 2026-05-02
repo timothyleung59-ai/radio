@@ -1449,11 +1449,19 @@ app.post('/api/dj/intro', async (req, res) => {
     if (curMood?.mood) ctx.push(`【当前电台情绪】${curMood.mood} (${curMood.genre || ''})`);
     if (userCfg.taste) ctx.push(`【长期品味】\n${userCfg.taste}`);
 
+    // 客户端可传 length: 'short' | 'medium' | 'long'，控制串词长度
+    const lenKey = (req.body?.length || 'medium').toString().toLowerCase();
+    const lenSpec = lenKey === 'long'
+      ? '150-220 字，像 DJ 真展开聊一段：歌手背景 / 歌曲故事 / 风格 / 听感，写得有人味儿'
+      : lenKey === 'short'
+        ? '20-40 字，一句话点睛'
+        : '30-80 字，电台话筒前真说话';
+
     const sysPrompt = `你是 Claudio FM 的 AI 电台 DJ。听众点了"让 DJ 介绍这首"，请你用一段串场词介绍当前正在播放的这首歌。
 
 【硬规则】
 - 严格输出 JSON：{"intro":"..."}，不要任何解释/markdown 包裹
-- 串场词 30-80 字，像电台主持人在话筒前真说话，不是写稿
+- 串场词 ${lenSpec}
 - 严格按【DJ 说话语调】的语气、用词、节奏
 - 可以聊歌手背景、歌曲故事、风格特征、当下听感，让听众更懂这首歌
 - 不要出现"现在为您播放""敬请收听"这种生硬主持腔
