@@ -531,12 +531,14 @@ function extractTextFromBlocks(blocks) {
   }
   return parts.filter(Boolean).join('\n').trim();
 }
-function extractJsonFromBlocks(blocks) {
+// expect: 'object' (默认，找 {...}) 或 'array' (找 [...])。
+// daily-playlist 这种返数组的 LLM 调用也走这里，保持 6 个调用点统一。
+function extractJsonFromBlocks(blocks, expect = 'object') {
   const text = extractTextFromBlocks(blocks);
   if (!text) return { text: '', json: null };
   try { return { text, json: JSON.parse(text) }; } catch {}
-  // 从文本里抠最大花括号块
-  const m = text.match(/\{[\s\S]*\}/);
+  const re = expect === 'array' ? /\[[\s\S]*\]/ : /\{[\s\S]*\}/;
+  const m = text.match(re);
   if (m) {
     try { return { text, json: JSON.parse(m[0]) }; } catch {}
   }
@@ -2036,12 +2038,7 @@ ${cfg.taste ? '品味偏好：' + cfg.taste : ''}
       messages: [{ role: 'user', content: prompt }]
     });
     const blocks = response.content || [];
-    const text = extractTextFromBlocks(blocks);
-    let songs = [];
-    try { songs = JSON.parse(text); } catch {
-      const m = text.match(/\[[\s\S]*\]/);
-      if (m) try { songs = JSON.parse(m[0]); } catch {}
-    }
+    const { json: songs } = extractJsonFromBlocks(blocks, 'array');
     if (!Array.isArray(songs) || songs.length === 0) throw new Error('AI 返回无法解析');
 
     const result = db.prepare('INSERT INTO playlists (user_id, name, type) VALUES (?, ?, ?)').run(userId, '今日推荐', 'daily');
