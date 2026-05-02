@@ -1277,7 +1277,9 @@ app.post('/api/radio/next', async (req, res) => {
     const habit = buildHabitSnapshot(userId);
 
     // 历史 50 → 20，前 20 已经够覆盖"近期"语义
-    const dbRecent = db.prepare(`SELECT song_name, artist FROM play_history WHERE user_id=? ORDER BY id DESC LIMIT 20`).all(userId);
+    // 历史 dedup 池：拉 40 行（client 还会再带 ~10 条 recent，总 dedup 池约 50）。
+    // 之前砍到 20 是 prefill 优化，但用户反馈"几首内重复"——这条最影响体感
+    const dbRecent = db.prepare(`SELECT song_name, artist FROM play_history WHERE user_id=? ORDER BY id DESC LIMIT 40`).all(userId);
     const noRepeatMap = new Map();
     for (const r of dbRecent) {
       if (r.song_name) noRepeatMap.set(`${r.song_name}|${r.artist || ''}`, `《${r.song_name}》${r.artist || ''}`);
