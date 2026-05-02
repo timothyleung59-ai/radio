@@ -1348,13 +1348,18 @@ app.post('/api/radio/next', async (req, res) => {
       seenForCount.add(sid);
       orderedArtists.push((r.artist || '').toString().trim());
     }
+    // 配额计数按"子艺人"算——合作艺人 "Alan Walker/Coldplay" 拆成两个分别计。
+    // 否则 AI 可以用合作版偷渡（明明 Coldplay 已经超配额，"Alan Walker/Coldplay" 因为字符串不等就过了）
+    const splitArtists = promptBuilder.splitArtists;
     for (let i = 0; i < orderedArtists.length && i < 10; i++) {
-      const a = normalizeKey(orderedArtists[i]);
-      if (a) artistCount10.set(a, (artistCount10.get(a) || 0) + 1);
+      for (const a of splitArtists(orderedArtists[i])) {
+        artistCount10.set(a, (artistCount10.get(a) || 0) + 1);
+      }
     }
     for (let i = 0; i < orderedArtists.length && i < 30; i++) {
-      const a = normalizeKey(orderedArtists[i]);
-      if (a) artistCount30.set(a, (artistCount30.get(a) || 0) + 1);
+      for (const a of splitArtists(orderedArtists[i])) {
+        artistCount30.set(a, (artistCount30.get(a) || 0) + 1);
+      }
     }
     // 30 天窗口直接 SQL 聚合（datetime() 函数避免之前的 UTC 字符串比较 bug）
     const artistCount30d = new Map();
@@ -1365,33 +1370,41 @@ app.post('/api/radio/next', async (req, res) => {
         GROUP BY artist
       `).all(userId);
       for (const row of rows30d) {
-        const a = normalizeKey(row.artist);
-        if (a) artistCount30d.set(a, row.cnt);
+        for (const a of splitArtists(row.artist)) {
+          artistCount30d.set(a, (artistCount30d.get(a) || 0) + row.cnt);
+        }
       }
     } catch (e) {
       console.warn('[radio/quota] 30d query failed: ' + e.message);
     }
 
-    // 配额检查器：返回触发的窗口名，null 表示未超额
+    // 配额检查器：合作艺人里**任何一个**超配额都拒。返回触发的窗口名，null = 未超额
     const isArtistOverQuota = (artist) => {
-      const a = normalizeKey(artist);
-      if (!a) return null;
-      if ((artistCount10.get(a) || 0) >= QUOTA_10) return 'last10';
-      if ((artistCount30.get(a) || 0) >= QUOTA_30) return 'last30';
-      if ((artistCount30d.get(a) || 0) >= QUOTA_30D) return 'last30d';
+      const subs = splitArtists(artist);
+      if (subs.length === 0) return null;
+      for (const a of subs) {
+        if ((artistCount10.get(a) || 0) >= QUOTA_10) return 'last10';
+        if ((artistCount30.get(a) || 0) >= QUOTA_30) return 'last30';
+        if ((artistCount30d.get(a) || 0) >= QUOTA_30D) return 'last30d';
+      }
       return null;
     };
 
     // 收集"已超配额"的艺人给 AI 看（最多 8 个，避免 prompt 太长）
+    // 这里展示子艺人——直接让 AI 看清楚 "Coldplay" 而不是 "Alan Walker/Coldplay"
     const overQuotaArtists = new Set();
-    for (const r of recentPlayed) {
-      const a = (r.artist || '').toString().trim();
-      if (a && isArtistOverQuota(a) && !overQuotaArtists.has(a)) overQuotaArtists.add(a);
-    }
-    for (const r of dbRecent) {
-      const a = (r.artist || '').toString().trim();
-      if (a && isArtistOverQuota(a) && !overQuotaArtists.has(a)) overQuotaArtists.add(a);
-    }
+    const collectOverQuota = (artistField) => {
+      for (const sub of splitArtists(artistField)) {
+        if (overQuotaArtists.has(sub)) continue;
+        if ((artistCount10.get(sub) || 0) >= QUOTA_10
+         || (artistCount30.get(sub) || 0) >= QUOTA_30
+         || (artistCount30d.get(sub) || 0) >= QUOTA_30D) {
+          overQuotaArtists.add(sub);
+        }
+      }
+    };
+    for (const r of recentPlayed) collectOverQuota(r.artist);
+    for (const r of dbRecent) collectOverQuota(r.artist);
     const recentArtistList = Array.from(overQuotaArtists).slice(0, 8);
 
     // queue 艺人集中度指标（用来观察 prefetch 链是否在累积同艺人偏见）
@@ -1450,12 +1463,32 @@ app.post('/api/radio/next', async (req, res) => {
       return true;
     };
 
-    // Source A: 网易云"相似歌"——基于 currentSong 拿同风格候选
-    if (currentSong?.id) {
+    // Source A + C: 网易云"相似歌" —— 多个种子并行拉，扩大候选池
+    //   A: currentSong.id（最强承接信号）
+    //   C: dbRecent 前 3 首（除掉 currentSong 自己）—— 给历史播放的多样化承接
+    // 单种子 /simi/song 大概 200ms，并行后 4 个种子总共还是 ~250ms
+    const fetchSimiSongs = async (seedId, label) => {
       try {
-        const r = await fetch(neteaseUrlForUser(userId, '/simi/song', { id: currentSong.id, limit: 30 }));
+        const r = await fetch(neteaseUrlForUser(userId, '/simi/song', { id: seedId, limit: 30 }));
         const data = await r.json();
-        const songs = data?.songs || [];
+        return { label, songs: data?.songs || [] };
+      } catch (e) {
+        console.warn(`[radio/pool] ${label} failed: ` + e.message);
+        return { label, songs: [] };
+      }
+    };
+    const simiSeedIds = [];
+    if (currentSong?.id) simiSeedIds.push({ id: String(currentSong.id), label: 'simi-cur' });
+    const dbSeedSet = new Set(simiSeedIds.map(s => s.id));
+    for (const r of dbRecent) {
+      if (simiSeedIds.length >= 4) break;   // 最多 4 个种子（cur + 3）
+      if (!r.song_id || dbSeedSet.has(String(r.song_id))) continue;
+      dbSeedSet.add(String(r.song_id));
+      simiSeedIds.push({ id: String(r.song_id), label: 'simi-rec' });
+    }
+    if (simiSeedIds.length > 0) {
+      const simiResults = await Promise.all(simiSeedIds.map(s => fetchSimiSongs(s.id, s.label)));
+      for (const { songs } of simiResults) {
         for (const s of songs) {
           const item = httpsifyNeteaseAssets({
             id: String(s.id),
@@ -1467,8 +1500,7 @@ app.post('/api/radio/next', async (req, res) => {
           tryAddToPool(item, 'simi');
           if (candidatePool.length >= POOL_TARGET) break;
         }
-      } catch (e) {
-        console.warn('[radio/pool] simi failed: ' + e.message);
+        if (candidatePool.length >= POOL_TARGET) break;
       }
     }
 
