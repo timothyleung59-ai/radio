@@ -1392,7 +1392,7 @@ app.post('/api/radio/next', async (req, res) => {
       ? '空字符串（用户关闭了 DJ 串词，直接给空 intro）'
       : `DJ 串场词（${introSpec}严格按 DJ 说话语调写）`;
 
-    const sysPrompt = `你是 Claudio FM 的 AI 电台 DJ。基于下方上下文为听众挑选下一首歌${introSpec === null ? '（用户关闭了串场词，intro 字段返空字符串即可）' : '，并给一段串场词'}。
+    const sysPrompt = `你是 Aidio FM 的 AI 电台 DJ。基于下方上下文为听众挑选下一首歌${introSpec === null ? '（用户关闭了串场词，intro 字段返空字符串即可）' : '，并给一段串场词'}。
 
 【输出要求 - 至关重要】
 直接输出最终 JSON 结果。不要任何思考过程、解释、推理、自言自语；不要 markdown 包裹；不要前后空行。第一个字符必须是 "{"。
@@ -1484,7 +1484,7 @@ app.post('/api/dj/intro', async (req, res) => {
         ? '20-40 字，一句话点睛'
         : '30-80 字，电台话筒前真说话';
 
-    const sysPrompt = `你是 Claudio FM 的 AI 电台 DJ。听众点了"让 DJ 介绍这首"，请你用一段串场词介绍当前正在播放的这首歌。
+    const sysPrompt = `你是 Aidio FM 的 AI 电台 DJ。听众点了"让 DJ 介绍这首"，请你用一段串场词介绍当前正在播放的这首歌。
 
 【输出要求 - 至关重要】
 直接输出最终 JSON。不要任何思考过程、推理、自言自语。第一个字符必须是 "{"。
@@ -1565,7 +1565,7 @@ async function callMoodAI(systemPrompt, userPrompt) {
   }
 }
 
-const MOOD_SYSTEM_BASE = `你是 Claudio FM 的电台情绪判断器。
+const MOOD_SYSTEM_BASE = `你是 Aidio FM 的电台情绪判断器。
 基于下方上下文判断用户当下的情绪状态，输出严格 JSON：
 {"mood":"情绪标签（2-6字）","genre":"推荐曲风（一句话）","message":"一句话描述用户现在的状态（10-25字）"}
 不要任何解释，不要 markdown 包裹。
@@ -1639,7 +1639,9 @@ async function resolveMood({ userId = 1, forceRefresh = false } = {}) {
     return null;
   }
   const data = { ...inferred, source, set_at: new Date().toISOString() };
-  writeMood(data);
+  // bug 修复：旧版漏传 userId，AI 推断的 mood 始终写不进数据库 →
+  // 下次读不到 → 又重新推断 → 客户端永远拿到 stale/null → "未判断"
+  writeMood(userId, data);
   return data;
 }
 
@@ -2575,7 +2577,7 @@ async function handleDispatchWs(ws, userId, message, currentSong) {
 }
 
 httpServer.listen(PORT, () => {
-  console.log(`Claudio FM 服务已启动: ${hasCerts ? 'https' : 'http'}://localhost:${PORT}`);
+  console.log(`Aidio FM 服务已启动: ${hasCerts ? 'https' : 'http'}://localhost:${PORT}`);
   console.log(`WebSocket dispatch:    ${hasCerts ? 'wss' : 'ws'}://localhost:${PORT}/api/ws/dispatch`);
 });
 

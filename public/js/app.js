@@ -11,7 +11,7 @@ import './radio.js';
 // 暴露 audio 给 radio.js 监听
 window.__claudioAudio = getAudioElement();
 
-console.log('Claudio FM 启动中...');
+console.log('Aidio FM 启动中...');
 
 // PWA
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
@@ -78,7 +78,7 @@ document.getElementById('npDjVoiceBtn')?.addEventListener('click', async (e) => 
   const btn = e.currentTarget;
   const song = window.player?.getCurrentSong?.();
   if (!song) {
-    window.voice?.speak('欢迎来到 Claudio FM，点开侧栏的电台模式开始你的音乐之旅。');
+    window.voice?.speak('欢迎来到 Aidio FM，点开侧栏的电台模式开始你的音乐之旅。');
     return;
   }
   // 防连点
@@ -498,7 +498,7 @@ async function init() {
     syncQueueBadges();
     const song = window.player?.getCurrentSong?.();
     if (song) syncNowPlaying(song);
-    console.log('Claudio FM 初始化完成');
+    console.log('Aidio FM 初始化完成');
   } catch (err) {
     console.error('初始化失败:', err);
     window.showToast('初始化失败，请刷新重试');
