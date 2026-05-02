@@ -30,6 +30,7 @@ RUN apk add --no-cache tzdata && \
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json ./
 COPY server.js tts-bigtts.js ./
+COPY lib ./lib
 COPY public ./public
 COPY config ./config
 
