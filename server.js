@@ -6,6 +6,8 @@ const fs = require('fs');
 const Database = require('better-sqlite3');
 const Anthropic = require('@anthropic-ai/sdk');
 const cron = require('node-cron');
+// Prompt 标准框架——所有 LLM 路由的 ctx 必须用这里的 helpers，详见 docs/prompt-architecture.md
+const promptBuilder = require('./lib/prompt-builder');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -149,6 +151,12 @@ function tableHasColumn(table, col) {
 const safeAlter = (sql) => { try { db.exec(sql); } catch (_) { /* 已存在 */ } };
 safeAlter('ALTER TABLE play_history ADD COLUMN user_id INTEGER DEFAULT 1');
 safeAlter('ALTER TABLE chat_messages ADD COLUMN user_id INTEGER DEFAULT 1');
+
+// 选歌核心查询的索引（必须在 user_id 列被 ALTER 加上之后再建）：
+//   1. 30 天艺人配额聚合 + 历史候选池：按 (user_id, played_at) 范围扫
+//   2. 高分历史候选池筛 score≥1：按 (user_id, score, played_at) 复合
+safeAlter('CREATE INDEX IF NOT EXISTS idx_ph_user_played ON play_history(user_id, played_at DESC)');
+safeAlter('CREATE INDEX IF NOT EXISTS idx_ph_user_score_played ON play_history(user_id, score, played_at DESC)');
 
 // favorites: 单字段 PK 改成 (user_id, song_id) 复合 PK，必须重建
 if (!tableHasColumn('favorites', 'user_id')) {
@@ -1260,6 +1268,7 @@ app.get('/api/radio/modes', (req, res) => {
 });
 
 app.post('/api/radio/next', async (req, res) => {
+  const reqStart = Date.now();
   try {
     const userId = userIdOf(req);
     const recentPlayed = req.body?.recent || [];
@@ -1268,6 +1277,12 @@ app.post('/api/radio/next', async (req, res) => {
     const seedTags = (req.body?.tags || []).slice(0, 5);
     const modeKey = req.body?.mode && RADIO_MODES[req.body.mode] ? req.body.mode : 'default';
     const mode = RADIO_MODES[modeKey];
+    const queuePosition = Number.isInteger(req.body?.queuePosition) ? req.body.queuePosition : 0;
+    const VALID_SONG_STATES = ['full', 'partial', 'early', 'unknown'];
+    const currentSongState = VALID_SONG_STATES.includes(req.body?.currentSongState) ? req.body.currentSongState : 'unknown';
+
+    // 入口指标：每次 /api/radio/next 调用先打一条，便于关联同一请求的后续日志
+    console.info(`[radio/metrics] event=enter user=${userId} mode=${modeKey} recent=${recentPlayed.length} qpos=${queuePosition} state=${currentSongState} cur=${currentSong ? `${currentSong.name}/${currentSong.artist}` : 'null'}`);
 
     // 该用户的聊天 / 收藏 / 历史（精简：减小 prefill，提速 1-2s）
     const recentChat = db.prepare('SELECT role, content FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT 3').all(userId).reverse();
@@ -1277,67 +1292,124 @@ app.post('/api/radio/next', async (req, res) => {
 
     const habit = buildHabitSnapshot(userId);
 
-    // dedup 池：80 行历史 + client 带的 recent。80 行覆盖 ~一个 session 一晚的听歌量
+    // dedup 池：DB 80 行 (用于 ID/name 二次校验) + 给 AI 看的禁列只用最近 30 行 + client recent。
     const dbRecent = db.prepare(`SELECT song_id, song_name, artist FROM play_history WHERE user_id=? ORDER BY id DESC LIMIT 80`).all(userId);
-    // normalized 串：去括号注释（"(Live)" "(Remix)" "feat. X"）+ 小写 + 去空白
-    const normalizeKey = (s) => (s || '').toString()
-      .toLowerCase()
-      .replace(/[（(][^）)]*[）)]/g, '')      // 去括号
-      .replace(/feat\.?\s+[^,，;]+/gi, '')   // 去 feat. xxx
-      .replace(/\s+/g, '')
-      .trim();
-    const noRepeatMap = new Map();   // normalizedKey -> 显示标签
-    const playedIdSet = new Set();   // netease song_id 集合（数字字符串）
+    const normalizeKey = promptBuilder.normalizeKey;
+    const noRepeatMap = new Map();   // normalizedKey -> 显示标签（用于 post-resolve 校验，全 80 + recent）
+    const playedIdSet = new Set();
     for (const r of dbRecent) {
       if (r.song_name) {
         const k = `${normalizeKey(r.song_name)}|${normalizeKey(r.artist)}`;
-        noRepeatMap.set(k, `《${r.song_name}》${r.artist || ''}`);
+        noRepeatMap.set(k, `《${r.song_name}》— ${r.artist || ''}`);
       }
       if (r.song_id) playedIdSet.add(String(r.song_id));
     }
     for (const r of recentPlayed) {
       if (r.name) {
         const k = `${normalizeKey(r.name)}|${normalizeKey(r.artist)}`;
-        noRepeatMap.set(k, `《${r.name}》${r.artist || ''}`);
+        noRepeatMap.set(k, `《${r.name}》— ${r.artist || ''}`);
       }
       if (r.id) playedIdSet.add(String(r.id));
     }
-    const noRepeatLabels = Array.from(noRepeatMap.values());
+
+    // 给 AI 看的禁列：只用最近 30 首（client recent + dbRecent 前 N），编号显示
+    const forbiddenForAi = [];
+    const seenForbidden = new Set();
+    const pushForbidden = (name, artist) => {
+      const k = `${normalizeKey(name)}|${normalizeKey(artist)}`;
+      if (seenForbidden.has(k) || !name) return;
+      seenForbidden.add(k);
+      forbiddenForAi.push(`《${name}》— ${artist || ''}`);
+    };
+    for (const r of recentPlayed) pushForbidden(r.name, r.artist);
+    for (const r of dbRecent) pushForbidden(r.song_name, r.artist);
+    const forbiddenList = forbiddenForAi.slice(0, 30);
+
+    // 艺人配额制（取代"最近 5 不同艺人硬封禁"）：在不同时间窗内对同艺人配额。
+    // 比硬封禁更精细：大艺人按比例约束，小艺人不被永久封死。
+    const QUOTA_10  = 1;   // 最近 10 首里同艺人 ≤ 1 首
+    const QUOTA_30  = 2;   // 最近 30 首里同艺人 ≤ 2 首
+    const QUOTA_30D = 5;   // 最近 30 天里同艺人 ≤ 5 首
+
+    // 合并 recentPlayed (含 prefetch queue) + dbRecent，按 song_id 去重，保持新→旧顺序
+    const artistCount10 = new Map();
+    const artistCount30 = new Map();
+    const seenForCount = new Set();
+    const orderedArtists = [];
+    for (const r of recentPlayed) {
+      const sid = r.id ? `id:${r.id}` : `n:${normalizeKey(r.name)}|${normalizeKey(r.artist)}`;
+      if (seenForCount.has(sid)) continue;
+      seenForCount.add(sid);
+      orderedArtists.push((r.artist || '').toString().trim());
+    }
+    for (const r of dbRecent) {
+      const sid = r.song_id ? `id:${r.song_id}` : `n:${normalizeKey(r.song_name)}|${normalizeKey(r.artist)}`;
+      if (seenForCount.has(sid)) continue;
+      seenForCount.add(sid);
+      orderedArtists.push((r.artist || '').toString().trim());
+    }
+    for (let i = 0; i < orderedArtists.length && i < 10; i++) {
+      const a = normalizeKey(orderedArtists[i]);
+      if (a) artistCount10.set(a, (artistCount10.get(a) || 0) + 1);
+    }
+    for (let i = 0; i < orderedArtists.length && i < 30; i++) {
+      const a = normalizeKey(orderedArtists[i]);
+      if (a) artistCount30.set(a, (artistCount30.get(a) || 0) + 1);
+    }
+    // 30 天窗口直接 SQL 聚合（datetime() 函数避免之前的 UTC 字符串比较 bug）
+    const artistCount30d = new Map();
+    try {
+      const rows30d = db.prepare(`
+        SELECT artist, COUNT(*) AS cnt FROM play_history
+        WHERE user_id=? AND played_at >= datetime('now', '-30 days') AND artist IS NOT NULL
+        GROUP BY artist
+      `).all(userId);
+      for (const row of rows30d) {
+        const a = normalizeKey(row.artist);
+        if (a) artistCount30d.set(a, row.cnt);
+      }
+    } catch (e) {
+      console.warn('[radio/quota] 30d query failed: ' + e.message);
+    }
+
+    // 配额检查器：返回触发的窗口名，null 表示未超额
+    const isArtistOverQuota = (artist) => {
+      const a = normalizeKey(artist);
+      if (!a) return null;
+      if ((artistCount10.get(a) || 0) >= QUOTA_10) return 'last10';
+      if ((artistCount30.get(a) || 0) >= QUOTA_30) return 'last30';
+      if ((artistCount30d.get(a) || 0) >= QUOTA_30D) return 'last30d';
+      return null;
+    };
+
+    // 收集"已超配额"的艺人给 AI 看（最多 8 个，避免 prompt 太长）
+    const overQuotaArtists = new Set();
+    for (const r of recentPlayed) {
+      const a = (r.artist || '').toString().trim();
+      if (a && isArtistOverQuota(a) && !overQuotaArtists.has(a)) overQuotaArtists.add(a);
+    }
+    for (const r of dbRecent) {
+      const a = (r.artist || '').toString().trim();
+      if (a && isArtistOverQuota(a) && !overQuotaArtists.has(a)) overQuotaArtists.add(a);
+    }
+    const recentArtistList = Array.from(overQuotaArtists).slice(0, 8);
+
+    // queue 艺人集中度指标（用来观察 prefetch 链是否在累积同艺人偏见）
+    const queueArtistCounts = {};
+    for (const r of recentPlayed.slice(0, 4)) {
+      const a = (r.artist || '').toString().trim();
+      if (a) queueArtistCounts[a] = (queueArtistCounts[a] || 0) + 1;
+    }
+    const queueDist = Object.entries(queueArtistCounts).map(([a, c]) => `${a}=${c}`).join(',') || 'empty';
+    console.info(`[radio/metrics] event=quota user=${userId} forbidden_artists=${recentArtistList.length} queue_dist={${queueDist}}`);
 
     const userCfg = getUserConfig(userId);
 
-    const ctx = [];
-    ctx.push(`【当前模式】${mode.label}`);
-    ctx.push(`【选歌风格】${mode.style}`);
-    ctx.push(`【DJ 说话语调】${mode.patterTone}`);
-    ctx.push(`【现在时间】${habit.weekdayType} · ${habit.timeBucket}`);
-    if (currentSong) ctx.push(`【上一首听众听到的歌（你写的串词要基于这首做承接）】《${currentSong.name}》— ${currentSong.artist}`);
-    if (noRepeatLabels.length) ctx.push(`【近期已听 — 绝对禁止从这里选任何一首】\n${noRepeatLabels.join('; ')}`);
-    if (recentIntros.length) {
-      const opens = recentIntros.map(s => '"' + String(s).slice(0, 40).trim() + '..."').join('  /  ');
-      ctx.push(`【最近 ${recentIntros.length} 段串词的开头（绝对禁止再用同一引子起头）】\n${opens}`);
-    }
+    // 用框架的 helpers（详见 docs/prompt-architecture.md）
+    const knownArtists = promptBuilder.getKnownArtists(db, userId);
+    const isExploreArtist = (artist) => !knownArtists.has(normalizeKey(artist));
 
-    if (modeKey === 'default') {
-      if (habit.sample.length > 0) {
-        ctx.push(`【你这个时段（${habit.weekdayType} ${habit.timeBucket}）的听歌习惯】基于 ${habit.sampleSize} 条历史:\n${habit.sample.join('; ')}\n常听艺术家: ${habit.topArtists.join('、') || '无'}`);
-      } else {
-        ctx.push(`【提示】这个时段还没足够的听歌历史，先按"喜欢的歌曲"风格推荐，逐步学习。`);
-      }
-    }
-
-    try {
-      const modeMd = readModeMd(userId, modeKey);
-      if (modeMd?.trim()) ctx.push(`【模式偏好（来自 modes/${modeKey}.md）】\n${modeMd}`);
-    } catch {}
-
-    if (localFavs.length) ctx.push(`【喜欢歌曲样本】${localFavs.map(s => `《${s.song_name}》${s.artist}`).join('; ')}`);
-    if (seedTags.length) ctx.push(`【种子标签】${seedTags.join('、')}`);
-    if (curMood?.mood) ctx.push(`【当前电台情绪】${curMood.mood} (${curMood.genre || ''})`);
-    if (recentChat.length) ctx.push(`【最近聊天】\n${recentChat.map(c => `${c.role === 'user' ? '听众' : 'DJ'}: ${c.content.slice(0, 80)}`).join('\n')}`);
-    if (userCfg.taste) ctx.push(`【长期品味】\n${userCfg.taste}`);
-
-    // 介绍长度（用户偏好）
+    // 介绍长度（提到 ctx 之前，让后面的 DJ 串词指南能感知是否启用）
     const introLength = (getPref(userId, 'intro_length') || 'medium').toLowerCase();
     const INTRO_SPEC = {
       off:    null,   // 跳过 LLM 的 intro 字段，直接放歌
@@ -1350,51 +1422,203 @@ app.post('/api/radio/next', async (req, res) => {
       ? '空字符串（用户关闭了 DJ 串词，直接给空 intro）'
       : `DJ 串场词（${introSpec}严格按 DJ 说话语调写）`;
 
-    const sysPrompt = `你是 Aidio FM 的 AI 电台 DJ。基于下方上下文为听众挑选下一首歌${introSpec === null ? '（用户关闭了串场词，intro 字段返空字符串即可）' : '，并给一段串场词'}。
+    // ========== Phase 3：候选池预过滤 + LLM 排序 ==========
+    // 不再让 LLM 凭空生成歌名，而是服务端先按"网易云相似 + 用户高分历史"
+    // 拼一个 ≤30 首的候选池，已过滤 dupId/dupName/超艺人配额。LLM 只需挑 pickIndex。
+    // 如果池子小于 5 首（冷启动 / 小众用户）回退到自由生成模式。
+    const POOL_TARGET = 30;
+    const candidatePool = [];
+    const poolSeenIds = new Set();
+    const poolSourceCounts = { simi: 0, history_high: 0 };
+    const tryAddToPool = (s, source) => {
+      const sid = String(s.id || '');
+      if (!sid || !s.name || !s.artist) return false;
+      if (poolSeenIds.has(sid)) return false;
+      if (playedIdSet.has(sid)) return false;
+      if (noRepeatMap.has(`${normalizeKey(s.name)}|${normalizeKey(s.artist)}`)) return false;
+      if (isArtistOverQuota(s.artist)) return false;
+      poolSeenIds.add(sid);
+      candidatePool.push({
+        id: sid,
+        name: s.name,
+        artist: s.artist,
+        album: s.album || '',
+        cover: s.cover || '',
+        source
+      });
+      poolSourceCounts[source] = (poolSourceCounts[source] || 0) + 1;
+      return true;
+    };
 
-【输出要求 - 至关重要】
-直接输出最终 JSON 结果。不要任何思考过程、解释、推理、自言自语；不要 markdown 包裹；不要前后空行。第一个字符必须是 "{"。
+    // Source A: 网易云"相似歌"——基于 currentSong 拿同风格候选
+    if (currentSong?.id) {
+      try {
+        const r = await fetch(neteaseUrlForUser(userId, '/simi/song', { id: currentSong.id, limit: 30 }));
+        const data = await r.json();
+        const songs = data?.songs || [];
+        for (const s of songs) {
+          const item = httpsifyNeteaseAssets({
+            id: String(s.id),
+            name: s.name,
+            artist: (s.artists || s.ar || []).map(a => a.name).join('/'),
+            album: s.album?.name || s.al?.name || '',
+            cover: (s.album || s.al)?.picUrl || ''
+          });
+          tryAddToPool(item, 'simi');
+          if (candidatePool.length >= POOL_TARGET) break;
+        }
+      } catch (e) {
+        console.warn('[radio/pool] simi failed: ' + e.message);
+      }
+    }
+
+    // Source B: 用户高分历史——三档时间窗，越远越优先（避免短期复读）
+    const tiersForPool = [
+      `AND played_at < datetime('now', '-30 days')`,
+      `AND played_at < datetime('now', '-7 days')`,
+      ''
+    ];
+    for (const where of tiersForPool) {
+      if (candidatePool.length >= POOL_TARGET) break;
+      try {
+        const rows = db.prepare(`
+          SELECT song_id, MAX(song_name) AS song_name, MAX(artist) AS artist,
+                 MAX(album) AS album, MAX(cover_url) AS cover_url
+          FROM play_history
+          WHERE user_id=? AND song_id IS NOT NULL AND COALESCE(score,0) >= 1 ${where}
+          GROUP BY song_id
+          ORDER BY RANDOM() LIMIT 20
+        `).all(userId);
+        for (const r of rows) {
+          tryAddToPool({
+            id: r.song_id,
+            name: r.song_name,
+            artist: r.artist,
+            album: r.album || '',
+            cover: r.cover_url || ''
+          }, 'history_high');
+          if (candidatePool.length >= POOL_TARGET) break;
+        }
+      } catch (e) {
+        console.warn('[radio/pool] history query failed: ' + e.message);
+      }
+    }
+
+    const usePool = candidatePool.length >= 5;
+    const poolDist = Object.entries(poolSourceCounts).map(([k, v]) => `${k}:${v}`).join(',');
+
+    // P1: 池子统计 + 探索艺人识别
+    // ========== 用 promptBuilder 构建 ctx（详见 docs/prompt-architecture.md） ==========
+    const poolDisplay = usePool
+      ? promptBuilder.buildCandidatePoolDisplay({ candidatePool, knownArtists })
+      : null;
+    const exploreCount = poolDisplay ? poolDisplay.exploreCount : 0;
+    const uniqueArtists = poolDisplay ? poolDisplay.uniqueArtists : 0;
+    console.info(`[radio/metrics] event=pool user=${userId} size=${candidatePool.length} use_pool=${usePool} sources={${poolDist}} unique_artists=${uniqueArtists} explore_count=${exploreCount}`);
+
+    const listenerNarrative = promptBuilder.buildListenerNarrative({
+      habit, mode, modeKey, curMood, currentSong, currentSongState
+    });
+
+    const ctx = [];
+
+    // ─── 第 1 层：选歌依据（必读） ───
+    if (usePool) {
+      // pool 模式：候选池已过滤，禁列/favs/tags 都不需要
+      ctx.push(`${promptBuilder.formatLayer1Header()}\n${poolDisplay.poolBlock}`);
+      if (poolDisplay.exploreList.length > 0) {
+        const list = poolDisplay.exploreList.slice(0, 6).join(' / ');
+        ctx.push(`【⭐ 探索建议】这些艺人没在你的高分历史里出现过，今晚池子里有他们的歌，每 3-5 首挑一次他们的：${list}`);
+      }
+    } else {
+      // free 模式：靠 🚫 禁列 + 艺人配额提示
+      const headerParts = [promptBuilder.formatLayer1Header()];
+      if (forbiddenList.length) {
+        const numberedF = forbiddenList.map((s, i) => `${i + 1}. ${s}`).join('\n');
+        headerParts.push(`🚫 严禁挑下面这些歌（最近播过/跳过）：\n${numberedF}\n（含翻唱/Live/Remix/不同专辑各种变体一并禁）`);
+      }
+      ctx.push(headerParts.join('\n'));
+      if (recentArtistList.length) {
+        ctx.push(`🚫 这些艺人已超配额（10/30 首/30 天三档），下一首禁选他们：${recentArtistList.join(' / ')}`);
+      }
+    }
+    ctx.push(`【模式 / 风格 / 语调】${mode.label} · ${mode.style} · ${mode.patterTone}`);
+    const prevSongLine = promptBuilder.formatPrevSongLine(currentSong, currentSongState);
+    if (prevSongLine) ctx.push(prevSongLine);
+    if (queuePosition > 0) {
+      ctx.push(`【⚙ 预取位置】这是预取队列的第 ${queuePosition + 1} 首（用户还没听到）。**主动切风格、切艺人**——预取链一直延续会让队列变成同艺人选集。`);
+    }
+
+    // ─── 第 2 层：当下场景 ───
+    const sceneLayer = promptBuilder.buildSceneLayer(listenerNarrative);
+    if (sceneLayer) ctx.push(sceneLayer);
+
+    // ─── 第 3 层：长期背景（参考） ───
+    const bgLayer = promptBuilder.buildBackgroundLayer({
+      readModeMd, userId, modeKey,
+      taste: userCfg.taste,
+      recentChat,
+      localFavs,
+      seedTags,
+      includeFavs: !usePool,    // pool 模式下 history_high source 已涵盖
+      includeTags: !usePool
+    });
+    if (bgLayer) ctx.push(bgLayer);
+
+    // ─── DJ 串词指南（intro 启用时才加） ───
+    const djGuide = promptBuilder.buildDjIntroGuide({
+      lengthSpec: introSpec, mode, currentSong, recentIntros
+    });
+    if (djGuide) ctx.push(djGuide);
+
+    const sysPrompt = usePool
+      ? `你是 Aidio FM 的 AI 电台 DJ。${introSpec === null ? '从候选池里挑下一首歌（intro 返空字符串）' : '从候选池里挑下一首歌 + 写一段串场词'}。
 
 【硬规则 - 必须遵守】
-- 严格输出 JSON，不要任何解释/markdown 包裹
-- 只挑 1 首歌
-- 绝对禁止【近期已听】列表里的任何一首（包括翻唱版、Live 版、Remix、不同专辑版本）
-- 选歌必须严格符合【选歌风格】定义的风格基调
-${introSpec === null ? '- intro 字段必须是空字符串 ""（用户关闭了 DJ 串词）' : `- 串场词必须严格符合【DJ 说话语调】的语气、风格、用词\n- 串场词长度：${introSpec}\n- 串场词要像电台主持人在话筒前真说话，不是写稿；不要书面语\n- 串场词必须基于【上一首听众听到的歌】做承接（点评 / 关联 / 转折），不要凭空开始`}
-- 优先选用网易云上能找到的歌
-
-【串场词写法 - 每段都要变着花来】
-- 严禁所有串词都用同一个时段意象起头（例如"午后阳光""夜深了""清晨的"），即使现在确实是那个时段
-- 看【最近串词开头】列出的开法，**坚决换一个完全不同的切入角度**——可以从歌手 / 歌词意象 / 某段乐器 / 某次跟听众的对话 / 上一首和这一首的对比 / 一个反问 / 一个意外联想 切入
-- 同一段对话/同一个 session 里的串词风格要像同一个 DJ 在自然变换话题，不是模板化复读
-
-【多样性 - 重要】
-- 不要总聚焦在【长期品味】里反复出现的少数艺术家。在符合风格基调的前提下，主动拓宽。
-- 禁止连续 2 次从同一艺术家选歌（除非用户在【最近聊天】里明确点名要听）。
-- 鼓励偶尔尝试【长期品味】没明确提到、但风格相邻的艺术家。例：
-  · 你 taste 写"周杰伦 / 林俊杰" → 偶尔可以推 陶喆同期作品、王力宏、Khalil Fong
-  · 你 taste 写"Bruno Mars" → 可以推 Anderson .Paak / Daniel Caesar / Silk Sonic / The Weeknd 早期
-  · 你 taste 写"方大同" → 可以推 Tank / 徐佳莹 / 王若琳 / 陶喆 较冷门曲目
-- 在【喜欢歌曲样本】的艺术家之外，每 5 首推荐里至少 1 首是"探索曲"（相邻风格的新艺术家）。
+1. 输出严格 JSON，第一个字符必须是 "{"，不要 markdown / 解释 / 思考过程
+2. 必须从【候选池】里挑（输出 pickIndex，从 1 开始计数），禁止生成池外的歌
+3. 选歌优先承接【上一首（承接基线）】的氛围，符合【模式 / 风格 / 语调】的基调
+4. 多样性：池子里有 ⭐ 标记的"探索艺人"，每 3-5 首挑一次他们的歌${introSpec === null ? '' : `
+5. 串场词严格按【DJ 串词指南】里的长度、语调、承接、避免复读各项要求写`}
 
 【输出 schema】
-{"song":{"name":"歌名","artist":"歌手"},"reason":"为何选这首（一句话内）","intro":"${introSchemaText}"}`;
+{"pickIndex":<候选池里的编号 1-${candidatePool.length}>,"intro":"${introSchemaText}"}`
+      : `你是 Aidio FM 的 AI 电台 DJ。${introSpec === null ? '挑下一首歌（intro 返空字符串）' : '挑下一首歌 + 写一段串场词'}。
+
+【硬规则 - 全部必须遵守，违反任何一条都会被服务端打回重选】
+1. 输出严格 JSON，第一个字符必须是 "{"，不要 markdown / 解释 / 思考过程
+2. 只挑 1 首歌
+3a. 🚫 编号歌单里的歌一首都不能选（含 Live/Remix/翻唱/不同版本）
+3b. 🚫 艺人禁列里的艺人，他们的任何歌都不能选——不要只换一首歌却保留同艺人
+4. 选歌必须符合【模式 / 风格 / 语调】里的风格基调
+5. 优先选网易云能找到的歌（避免太冷门/未上架）
+6. 多样性配额：连续 5 首歌里至少 1 首是【长期品味】里没出现过的"探索艺人"${introSpec === null ? '' : `
+7. 串场词严格按【DJ 串词指南】里的长度、语调、承接、避免复读各项要求写`}
+
+【输出 schema】
+{"song":{"name":"歌名","artist":"歌手"},"intro":"${introSchemaText}"}`;
 
     const userPrompt = ctx.join('\n\n');
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });
 
-    // LLM 重试循环：post-resolve 双重 dedup（song_id + normalized name）。
-    // sysPrompt 写了"绝对禁止"但 LLM 偶尔不听；命中重复就拉回来再选，最多 3 次
+    // LLM 重试循环：累积反馈，三重 dedup。
+    // sysPrompt 写了"绝对禁止"但 LLM 偶尔不听；累积所有被拒过的 pick 让 AI 看到完整历史。
     const MAX_ATTEMPTS = 3;
     let parsed = null;
     let resolved = null;
-    let lastBadPick = null;
+    const badPicks = [];   // 累积所有被拒的尝试，供下一轮 prompt 引用
     let lastRawText = '';
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-      const promptWithFeedback = userPrompt + (lastBadPick
-        ? `\n\n【上一轮你刚选了《${lastBadPick.name}》— ${lastBadPick.artist}，这首在【近期已听】里！这次必须挑一首跟它不同艺人/不同歌的】`
-        : '');
+      let feedback = '';
+      if (badPicks.length > 0) {
+        const list = badPicks.map((p, i) => `  ${i + 1}. 《${p.name}》— ${p.artist}（${p.reason}）`).join('\n');
+        const bannedArtists = Array.from(new Set(badPicks.map(p => (p.artist || '').trim()).filter(Boolean)));
+        feedback = usePool
+          ? `\n\n⚠️ 本轮你已经被打回 ${badPicks.length} 次：\n${list}\n\n请输出**有效的 pickIndex**（候选池里 1-${candidatePool.length} 的整数）。`
+          : `\n\n⚠️ 本轮你已经被打回 ${badPicks.length} 次：\n${list}\n\n下面这些艺人本轮内**绝对不要再选**：${bannedArtists.join(' / ')}。必须换一个全新艺人。`;
+      }
+      const promptWithFeedback = userPrompt + feedback;
       const response = await anthropic.messages.create({
         model: process.env.ANTHROPIC_MODEL,
         max_tokens: 2048,
@@ -1406,36 +1630,97 @@ ${introSpec === null ? '- intro 字段必须是空字符串 ""（用户关闭了
       const xr = extractJsonFromBlocks(blocks);
       lastRawText = xr.text;
       const candidate = xr.json;
+
+      if (usePool) {
+        // Pool 模式：AI 只需要给 pickIndex，无需 resolveSong / dedup（候选池已预过滤）
+        const idx = Number(candidate?.pickIndex);
+        if (!Number.isInteger(idx) || idx < 1 || idx > candidatePool.length) {
+          console.warn(`[radio/metrics] event=pool_invalid_index user=${userId} attempt=${attempt} got=${JSON.stringify(candidate?.pickIndex)}`);
+          badPicks.push({ name: '(invalid)', artist: '(invalid)', reason: `pickIndex 越界或非整数 (got=${JSON.stringify(candidate?.pickIndex)})` });
+          continue;
+        }
+        const picked = candidatePool[idx - 1];
+        parsed = { song: { name: picked.name, artist: picked.artist }, intro: candidate?.intro || '' };
+        resolved = picked;
+        console.info(`[radio/metrics] event=accept user=${userId} attempt=${attempt} mode=pool pick="${picked.name}/${picked.artist}" idx=${idx} src=${picked.source} elapsed=${Date.now() - reqStart}ms`);
+        break;
+      }
+
+      // Free 模式（候选池太小或为空时的兜底路径）：旧的"自由生成 + post-resolve dedup"
       if (!candidate?.song?.name) {
-        console.warn(`[radio/next] attempt ${attempt} 解析失败`);
+        console.warn(`[radio/metrics] event=parse_fail user=${userId} attempt=${attempt}`);
         continue;
       }
       const r = await resolveSong(candidate.song);
       if (!r?.id) {
-        console.warn(`[radio/next] attempt ${attempt} 网易云未找到《${candidate.song.name}》`);
-        lastBadPick = candidate.song;
+        console.warn(`[radio/metrics] event=netease_miss user=${userId} attempt=${attempt} pick="${candidate.song.name}/${candidate.song.artist}"`);
+        badPicks.push({ name: candidate.song.name, artist: candidate.song.artist, reason: 'netease_miss' });
         continue;
       }
-      // post-resolve dedup
       const dupById = playedIdSet.has(String(r.id));
       const dupByName = noRepeatMap.has(`${normalizeKey(r.name)}|${normalizeKey(r.artist)}`);
-      if (dupById || dupByName) {
-        console.warn(`[radio/next] attempt ${attempt} 选到重复：《${r.name}》— ${r.artist} (id=${r.id}, dupById=${dupById}, dupByName=${dupByName})`);
-        lastBadPick = { name: r.name, artist: r.artist };
+      const quotaWindow = isArtistOverQuota(r.artist);   // null 或 'last10'/'last30'/'last30d'
+      if (dupById || dupByName || quotaWindow) {
+        const reason = dupById ? 'id_dup' : (dupByName ? 'name_dup' : `artist_quota_${quotaWindow}`);
+        console.warn(`[radio/metrics] event=reject user=${userId} attempt=${attempt} reason=${reason} pick="${r.name}/${r.artist}" id=${r.id}`);
+        badPicks.push({ name: r.name, artist: r.artist, reason });
         continue;
       }
       parsed = candidate;
       resolved = r;
-      if (attempt > 1) console.info(`[radio/next] attempt ${attempt} 成功`);
+      console.info(`[radio/metrics] event=accept user=${userId} attempt=${attempt} mode=free pick="${r.name}/${r.artist}" id=${r.id} elapsed=${Date.now() - reqStart}ms`);
       break;
     }
 
-    if (!parsed?.song?.name) {
-      console.warn('radio/next: AI 反复无法解析。raw:', lastRawText.slice(0, 300));
-      return res.status(502).json({ error: 'AI 返回格式异常' });
-    }
+    // 兜底：AI 反复选不出来 → 从历史高分歌挑一首，避免客户端拿到 404 卡住 prefetch
     if (!resolved?.id) {
-      return res.status(404).json({ error: 'AI 反复选到重复或网易云没有的歌，请稍后再试' });
+      console.warn(`[radio/metrics] event=fallback_trigger user=${userId} retries=${MAX_ATTEMPTS} bad_picks=${badPicks.length}`);
+      const fallbackQuery = (whereClause) => db.prepare(`
+        SELECT song_id, MAX(song_name) AS song_name, MAX(artist) AS artist,
+               MAX(album) AS album, MAX(cover_url) AS cover_url
+        FROM play_history
+        WHERE user_id=? AND song_id IS NOT NULL AND COALESCE(score,0) >= 1 ${whereClause}
+        GROUP BY song_id
+        ORDER BY RANDOM() LIMIT 30
+      `).all(userId);
+      let fallback = null;
+      const tiers = [
+        `AND played_at < datetime('now', '-30 days')`,
+        `AND played_at < datetime('now', '-7 days')`,
+        ''
+      ];
+      for (const where of tiers) {
+        const candidates = fallbackQuery(where);
+        for (const c of candidates) {
+          if (playedIdSet.has(String(c.song_id))) continue;
+          if (noRepeatMap.has(`${normalizeKey(c.song_name)}|${normalizeKey(c.artist)}`)) continue;
+          if (isArtistOverQuota(c.artist)) continue;
+          fallback = c;
+          break;
+        }
+        if (fallback) break;
+      }
+
+      if (!fallback) {
+        console.warn(`[radio/metrics] event=fail_no_fallback user=${userId} elapsed=${Date.now() - reqStart}ms raw="${lastRawText.slice(0, 200)}"`);
+        if (!parsed?.song?.name) {
+          return res.status(502).json({ error: 'AI 返回格式异常' });
+        }
+        return res.status(404).json({ error: 'AI 反复选到重复或网易云没有的歌，请稍后再试' });
+      }
+
+      console.info(`[radio/metrics] event=fallback_used user=${userId} pick="${fallback.song_name}/${fallback.artist}" elapsed=${Date.now() - reqStart}ms`);
+      return res.json({
+        song: {
+          id: fallback.song_id,
+          name: fallback.song_name,
+          artist: fallback.artist,
+          album: fallback.album || '',
+          cover: fallback.cover_url || ''
+        },
+        reason: '从你的高分历史挑一首兜底',
+        intro: introSpec === null ? '' : `下面为你播放${fallback.artist}的《${fallback.song_name}》，请欣赏。`
+      });
     }
 
     const finalIntro = introSpec === null
@@ -1444,7 +1729,7 @@ ${introSpec === null ? '- intro 字段必须是空字符串 ""（用户关闭了
 
     res.json({
       song: { id: resolved.id, name: resolved.name, artist: resolved.artist, album: resolved.album, cover: resolved.cover },
-      reason: parsed.reason || '',
+      reason: '',
       intro: finalIntro
     });
   } catch (e) {
@@ -1454,6 +1739,11 @@ ${introSpec === null ? '- intro 字段必须是空字符串 ""（用户关闭了
 });
 
 // ========== AI 给当前歌写一段 DJ 串词（当前歌已在播，不挑新歌）==========
+// 用 Aidio FM Prompt 标准框架（详见 docs/prompt-architecture.md）：
+//   1) 选歌依据 → 这里没有"选歌"，把"这首歌"放在第 1 层
+//   2) 当下场景 → listenerNarrative
+//   3) 长期背景 → modeMd / taste / chat
+//   DJ 串词指南 → 长度由 req.body.length 控制
 app.post('/api/dj/intro', async (req, res) => {
   try {
     const userId = userIdOf(req);
@@ -1466,14 +1756,7 @@ app.post('/api/dj/intro', async (req, res) => {
     try { curMood = await resolveMood({ userId }); } catch {}
     const habit = buildHabitSnapshot(userId);
     const userCfg = getUserConfig(userId);
-
-    const ctx = [];
-    ctx.push(`【当前模式】${mode.label}`);
-    ctx.push(`【DJ 说话语调】${mode.patterTone}`);
-    ctx.push(`【现在时间】${habit.weekdayType} · ${habit.timeBucket}`);
-    ctx.push(`【这首歌】《${song.name}》— ${song.artist || '未知'}${song.album ? ` · ${song.album}` : ''}`);
-    if (curMood?.mood) ctx.push(`【当前电台情绪】${curMood.mood} (${curMood.genre || ''})`);
-    if (userCfg.taste) ctx.push(`【长期品味】\n${userCfg.taste}`);
+    const recentChat = db.prepare('SELECT role, content FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT 3').all(userId).reverse();
 
     // 客户端可传 length: 'short' | 'medium' | 'long'，控制串词长度
     const lenKey = (req.body?.length || 'medium').toString().toLowerCase();
@@ -1483,18 +1766,45 @@ app.post('/api/dj/intro', async (req, res) => {
         ? '20-40 字，一句话点睛'
         : '30-80 字，电台话筒前真说话';
 
-    const sysPrompt = `你是 Aidio FM 的 AI 电台 DJ。听众点了"让 DJ 介绍这首"，请你用一段串场词介绍当前正在播放的这首歌。
+    // 框架 ctx：三层 + DJ 串词指南
+    const ctx = [];
 
-【输出要求 - 至关重要】
-直接输出最终 JSON。不要任何思考过程、推理、自言自语。第一个字符必须是 "{"。
+    // 第 1 层：这首歌就是焦点
+    ctx.push(`${promptBuilder.formatLayer1Header()}
+【这首歌（介绍主体）】《${song.name}》— ${song.artist || '未知'}${song.album ? ` · ${song.album}` : ''}
+【模式 / 风格 / 语调】${mode.label} · ${mode.style} · ${mode.patterTone}`);
+
+    // 第 2 层：listener narrative（不带 currentSong，因为 song 本身就是焦点，避免重复）
+    const narrative = promptBuilder.buildListenerNarrative({
+      habit, mode, modeKey, curMood, currentSong: null, currentSongState: 'unknown'
+    });
+    const sceneLayer = promptBuilder.buildSceneLayer(narrative);
+    if (sceneLayer) ctx.push(sceneLayer);
+
+    // 第 3 层：长期背景
+    const bgLayer = promptBuilder.buildBackgroundLayer({
+      readModeMd, userId, modeKey,
+      taste: userCfg.taste,
+      recentChat,
+      includeFavs: false,
+      includeTags: false
+    });
+    if (bgLayer) ctx.push(bgLayer);
+
+    // DJ 串词指南
+    const djGuide = promptBuilder.buildDjIntroGuide({
+      lengthSpec: lenSpec, mode, currentSong: null, recentIntros: null
+    });
+    if (djGuide) ctx.push(djGuide);
+
+    const sysPrompt = `你是 Aidio FM 的 AI 电台 DJ。听众点了"让 DJ 介绍这首"，请按【DJ 串词指南】的长度/语调要求介绍【这首歌】。
 
 【硬规则】
-- 严格输出 JSON：{"intro":"..."}，不要任何解释/markdown 包裹
-- 串场词 ${lenSpec}
-- 严格按【DJ 说话语调】的语气、用词、节奏
-- 可以聊歌手背景、歌曲故事、风格特征、当下听感，让听众更懂这首歌
-- 不要出现"现在为您播放""敬请收听"这种生硬主持腔
-- 不要复读歌名歌手三遍以上`;
+1. 输出严格 JSON：{"intro":"..."}，第一个字符必须是 "{"，不要 markdown / 思考过程
+2. 严格按【DJ 串词指南】里的长度、语调
+3. 内容可聊歌手背景、歌曲故事、风格特征、当下听感
+4. 不要出现"现在为您播放""敬请收听"这类生硬主持腔
+5. 不要复读歌名歌手三遍以上`;
 
     const userPrompt = ctx.join('\n\n');
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });
@@ -1831,13 +2141,17 @@ fs.watch(configDir, (event, filename) => {
   }
 });
 
-function buildSystemPrompt(userId, currentSong, chatHistory) {
+// chat 路径的 system prompt。任务结构跟选歌不同（输出 say+play+memory），
+// 不强行套三层框架，但用 promptBuilder.truncateAtBoundary 控长度，
+// 跟选歌路径保持一致的长度上限：
+//   agent 不截（人格定义本来就短）/ taste 800 / routines 400 / moodrules 400
+function buildSystemPrompt(userId, currentSong, chatHistory, currentSongState) {
   const cfg = getUserConfig(userId);
   const parts = [];
   if (cfg.agent) parts.push(cfg.agent);
-  if (cfg.taste) parts.push(`## 音乐品味\n${cfg.taste}`);
-  if (cfg.routines) parts.push(`## 行为习惯\n${cfg.routines}`);
-  if (cfg.moodrules) parts.push(`## 情绪规则\n${cfg.moodrules}`);
+  if (cfg.taste) parts.push(`## 音乐品味\n${promptBuilder.truncateAtBoundary(cfg.taste, 800)}`);
+  if (cfg.routines) parts.push(`## 行为习惯\n${promptBuilder.truncateAtBoundary(cfg.routines, 400)}`);
+  if (cfg.moodrules) parts.push(`## 情绪规则\n${promptBuilder.truncateAtBoundary(cfg.moodrules, 400)}`);
 
   const now = new Date();
   const weekDays = ['日', '一', '二', '三', '四', '五', '六'];
@@ -1845,7 +2159,11 @@ function buildSystemPrompt(userId, currentSong, chatHistory) {
   parts.push(`## 当前时间\n${timeStr}`);
 
   if (currentSong) {
-    parts.push(`## 当前播放\n歌曲：${currentSong.name}，艺术家：${currentSong.artist}，专辑：${currentSong.album || '未知'}`);
+    const stateLabel = currentSongState === 'full' ? '（用户完整听完）'
+      : currentSongState === 'partial' ? '（用户听了一段）'
+      : currentSongState === 'early' ? '（用户只听了开头就要换——这首没抓住听众）'
+      : '';
+    parts.push(`## 当前播放\n歌曲：${currentSong.name}，艺术家：${currentSong.artist}，专辑：${currentSong.album || '未知'}${stateLabel}`);
   }
 
   parts.push(`## 回复格式
@@ -1900,7 +2218,7 @@ function appendUserMemory(userId, memoryArr) {
 
 app.post('/api/dispatch', async (req, res) => {
   const userId = userIdOf(req);
-  const { message, currentSong } = req.body;
+  const { message, currentSong, currentSongState } = req.body;
 
   if (exactCommands[message]) {
     return res.json({ type: 'command', ...exactCommands[message]() });
@@ -1922,7 +2240,7 @@ app.post('/api/dispatch', async (req, res) => {
     const history = db.prepare('SELECT * FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT 20').all(userId).reverse();
     const messages = history.map(h => ({ role: h.role, content: h.content }));
     messages.push({ role: 'user', content: message });
-    const systemPrompt = buildSystemPrompt(userId, currentSong, history);
+    const systemPrompt = buildSystemPrompt(userId, currentSong, history, currentSongState);
 
     const stream = await anthropic.messages.stream({
       model: process.env.ANTHROPIC_MODEL,
@@ -2426,13 +2744,13 @@ wss.on('connection', (ws, req) => {
       ws.send(JSON.stringify({ type: 'error', message: 'invalid json' }));
       return;
     }
-    const { message, currentSong } = payload;
+    const { message, currentSong, currentSongState } = payload;
     if (!message || typeof message !== 'string') {
       ws.send(JSON.stringify({ type: 'error', message: 'message field required' }));
       return;
     }
     try {
-      await handleDispatchWs(ws, userId, message, currentSong || null);
+      await handleDispatchWs(ws, userId, message, currentSong || null, currentSongState);
       console.log(`[ws/dispatch user=${userId}] done`);
     } catch (e) {
       console.error('[ws/dispatch] handler error:', e);
@@ -2444,7 +2762,7 @@ wss.on('connection', (ws, req) => {
 });
 
 // 复用 /api/dispatch 的全部逻辑，emit 改成 ws.send
-async function handleDispatchWs(ws, userId, message, currentSong) {
+async function handleDispatchWs(ws, userId, message, currentSong, currentSongState) {
   const send = (obj) => { try { ws.send(JSON.stringify(obj)); } catch (_) {} };
 
   if (exactCommands[message]) {
@@ -2472,7 +2790,7 @@ async function handleDispatchWs(ws, userId, message, currentSong) {
   const history = db.prepare('SELECT * FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT 20').all(userId).reverse();
   const messages = history.map(h => ({ role: h.role, content: h.content }));
   messages.push({ role: 'user', content: message });
-  const systemPrompt = buildSystemPrompt(userId, currentSong, history);
+  const systemPrompt = buildSystemPrompt(userId, currentSong, history, currentSongState);
 
   const stream = await anthropic.messages.stream({
     model: process.env.ANTHROPIC_MODEL,
