@@ -511,6 +511,38 @@ app.post('/api/auth/logout', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+// ========== Anthropic-compat 响应统一抽取 ==========
+// DeepSeek v4-flash 等"reasoning"模型有时只返回 thinking block 不返 text block，
+// 旧解析只看 b.type==='text' 会拿到空串 → 502 → 客户端重试一遍。
+// 这个 helper 把所有可能的文本字段都拼起来，并尝试从中扣出 JSON。
+function extractTextFromBlocks(blocks) {
+  if (!Array.isArray(blocks)) return '';
+  // 优先：标准 text block
+  let text = blocks.filter(b => b && b.type === 'text').map(b => b.text || '').join('').trim();
+  if (text) return text;
+  // 次优：所有可能字段（包含 thinking / input / content）
+  const parts = [];
+  for (const b of blocks) {
+    if (!b) continue;
+    if (typeof b.text === 'string') parts.push(b.text);
+    if (typeof b.thinking === 'string') parts.push(b.thinking);
+    if (typeof b.input === 'string') parts.push(b.input);
+    if (typeof b.content === 'string') parts.push(b.content);
+  }
+  return parts.filter(Boolean).join('\n').trim();
+}
+function extractJsonFromBlocks(blocks) {
+  const text = extractTextFromBlocks(blocks);
+  if (!text) return { text: '', json: null };
+  try { return { text, json: JSON.parse(text) }; } catch {}
+  // 从文本里抠最大花括号块
+  const m = text.match(/\{[\s\S]*\}/);
+  if (m) {
+    try { return { text, json: JSON.parse(m[0]) }; } catch {}
+  }
+  return { text, json: null };
+}
+
 // ========== 用户偏好（通用 KV，限制 key 白名单防注入）==========
 const ALLOWED_PREF_KEYS = new Set(['intro_length']);
 const PREF_VALUE_MAX = 200; // 简单上限，避免存超大字符串
@@ -1299,15 +1331,16 @@ app.post('/api/radio/next', async (req, res) => {
     const modeKey = req.body?.mode && RADIO_MODES[req.body.mode] ? req.body.mode : 'default';
     const mode = RADIO_MODES[modeKey];
 
-    // 该用户的聊天 / 收藏 / 历史
-    const recentChat = db.prepare('SELECT role, content FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT 6').all(userId).reverse();
-    const localFavs = db.prepare('SELECT song_name, artist FROM favorites WHERE user_id=? ORDER BY RANDOM() LIMIT 8').all(userId);
+    // 该用户的聊天 / 收藏 / 历史（精简：减小 prefill，提速 1-2s）
+    const recentChat = db.prepare('SELECT role, content FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT 3').all(userId).reverse();
+    const localFavs = db.prepare('SELECT song_name, artist FROM favorites WHERE user_id=? ORDER BY RANDOM() LIMIT 6').all(userId);
     let curMood = null;
     try { curMood = await resolveMood({ userId }); } catch {}
 
     const habit = buildHabitSnapshot(userId);
 
-    const dbRecent = db.prepare(`SELECT song_name, artist FROM play_history WHERE user_id=? ORDER BY id DESC LIMIT 50`).all(userId);
+    // 历史 50 → 20，前 20 已经够覆盖"近期"语义
+    const dbRecent = db.prepare(`SELECT song_name, artist FROM play_history WHERE user_id=? ORDER BY id DESC LIMIT 20`).all(userId);
     const noRepeatMap = new Map();
     for (const r of dbRecent) {
       if (r.song_name) noRepeatMap.set(`${r.song_name}|${r.artist || ''}`, `《${r.song_name}》${r.artist || ''}`);
@@ -1361,6 +1394,9 @@ app.post('/api/radio/next', async (req, res) => {
 
     const sysPrompt = `你是 Claudio FM 的 AI 电台 DJ。基于下方上下文为听众挑选下一首歌${introSpec === null ? '（用户关闭了串场词，intro 字段返空字符串即可）' : '，并给一段串场词'}。
 
+【输出要求 - 至关重要】
+直接输出最终 JSON 结果。不要任何思考过程、解释、推理、自言自语；不要 markdown 包裹；不要前后空行。第一个字符必须是 "{"。
+
 【硬规则 - 必须遵守】
 - 严格输出 JSON，不要任何解释/markdown 包裹
 - 只挑 1 首歌
@@ -1390,18 +1426,8 @@ ${introSpec === null ? '- intro 字段必须是空字符串 ""（用户关闭了
       system: sysPrompt,
       messages: [{ role: 'user', content: userPrompt }]
     });
-    // 兼容多种 SDK 返回：Claude 标准、DeepSeek-Anthropic、reasoning blocks
     const blocks = response.content || [];
-    let text = blocks.filter(b => b.type === 'text').map(b => b.text || '').join('').trim();
-    if (!text) {
-      // 兜底：拼接所有有 text 字段的 block
-      text = blocks.map(b => b.text || b.input || '').filter(Boolean).join('').trim();
-    }
-    let parsed = null;
-    try { parsed = JSON.parse(text); } catch {
-      const m = text.match(/\{[\s\S]*\}/);
-      if (m) try { parsed = JSON.parse(m[0]); } catch {}
-    }
+    const { text, json: parsed } = extractJsonFromBlocks(blocks);
     if (!parsed?.song?.name) {
       console.warn('radio/next: AI 返回无法解析。raw blocks:', JSON.stringify(blocks).slice(0, 500));
       return res.status(502).json({ error: 'AI 返回格式异常', raw: text.slice(0, 300), blocks: blocks.length });
@@ -1459,6 +1485,9 @@ app.post('/api/dj/intro', async (req, res) => {
 
     const sysPrompt = `你是 Claudio FM 的 AI 电台 DJ。听众点了"让 DJ 介绍这首"，请你用一段串场词介绍当前正在播放的这首歌。
 
+【输出要求 - 至关重要】
+直接输出最终 JSON。不要任何思考过程、推理、自言自语。第一个字符必须是 "{"。
+
 【硬规则】
 - 严格输出 JSON：{"intro":"..."}，不要任何解释/markdown 包裹
 - 串场词 ${lenSpec}
@@ -1476,13 +1505,7 @@ app.post('/api/dj/intro', async (req, res) => {
       messages: [{ role: 'user', content: userPrompt }]
     });
     const blocks = response.content || [];
-    let text = blocks.filter(b => b.type === 'text').map(b => b.text || '').join('').trim();
-    if (!text) text = blocks.map(b => b.text || '').filter(Boolean).join('').trim();
-    let parsed = null;
-    try { parsed = JSON.parse(text); } catch {
-      const m = text.match(/\{[\s\S]*\}/);
-      if (m) try { parsed = JSON.parse(m[0]); } catch {}
-    }
+    const { json: parsed } = extractJsonFromBlocks(blocks);
     const intro = parsed?.intro?.trim();
     if (!intro) {
       // 兜底
@@ -1531,13 +1554,7 @@ async function callMoodAI(systemPrompt, userPrompt) {
       messages: [{ role: 'user', content: userPrompt }]
     });
     const blocks = response.content || [];
-    let text = blocks.filter(b => b.type === 'text').map(b => b.text || '').join('').trim();
-    if (!text) text = blocks.map(b => b.text || '').filter(Boolean).join('').trim();
-    let parsed = null;
-    try { parsed = JSON.parse(text); } catch {
-      const m = text.match(/\{[\s\S]*\}/);
-      if (m) try { parsed = JSON.parse(m[0]); } catch {}
-    }
+    const { json: parsed } = extractJsonFromBlocks(blocks);
     if (!parsed?.mood) return null;
     return { mood: String(parsed.mood).slice(0, 20), genre: parsed.genre || '', message: parsed.message || '' };
   } catch (e) {
@@ -2015,8 +2032,7 @@ ${cfg.taste ? '品味偏好：' + cfg.taste : ''}
       messages: [{ role: 'user', content: prompt }]
     });
     const blocks = response.content || [];
-    let text = blocks.filter(b => b.type === 'text').map(b => b.text || '').join('').trim();
-    if (!text) text = blocks.map(b => b.text || '').filter(Boolean).join('').trim();
+    const text = extractTextFromBlocks(blocks);
     let songs = [];
     try { songs = JSON.parse(text); } catch {
       const m = text.match(/\[[\s\S]*\]/);
@@ -2103,13 +2119,7 @@ async function runTasteProfile(userId = 1) {
       messages: [{ role: 'user', content: ctx.join('\n\n') }]
     });
     const blocks = response.content || [];
-    let text = blocks.filter(b => b.type === 'text').map(b => b.text || '').join('').trim();
-    if (!text) text = blocks.map(b => b.text || '').filter(Boolean).join('').trim();
-    let parsed = null;
-    try { parsed = JSON.parse(text); } catch {
-      const m = text.match(/\{[\s\S]*\}/);
-      if (m) try { parsed = JSON.parse(m[0]); } catch {}
-    }
+    const { text, json: parsed } = extractJsonFromBlocks(blocks);
     const description = parsed?.description?.trim() || text;
     if (!description) throw new Error('AI 返回为空');
 
@@ -2183,8 +2193,7 @@ async function autoLearnModeFromHistory(modeKey, userId = 1) {
       messages: [{ role: 'user', content: summary }]
     });
     const blocks = response.content || [];
-    let text = blocks.filter(b => b.type === 'text').map(b => b.text || '').join('').trim();
-    if (!text) text = blocks.map(b => b.text || '').filter(Boolean).join('').trim();
+    const text = extractTextFromBlocks(blocks);
     if (!text) return { ok: false, error: 'AI 返回为空' };
 
     // 写入 AUTO-LEARN 区块（写到该用户的 mode md，没有就基于全局 default 创建）
