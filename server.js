@@ -1424,6 +1424,7 @@ ${introSpec === null ? '- intro 字段必须是空字符串 ""（用户关闭了
       model: process.env.ANTHROPIC_MODEL,
       max_tokens: 2048,
       system: sysPrompt,
+      thinking: { type: 'disabled' },     // 关 reasoning 通道，挑歌任务靠 prompt + JSON schema 就够了
       messages: [{ role: 'user', content: userPrompt }]
     });
     const blocks = response.content || [];
@@ -1502,6 +1503,7 @@ app.post('/api/dj/intro', async (req, res) => {
       model: process.env.ANTHROPIC_MODEL,
       max_tokens: 1024,
       system: sysPrompt,
+      thinking: { type: 'disabled' },     // DJ 串词不需要思考过程
       messages: [{ role: 'user', content: userPrompt }]
     });
     const blocks = response.content || [];
