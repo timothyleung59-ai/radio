@@ -75,24 +75,6 @@ db.exec(`
     played_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 
-  CREATE TABLE IF NOT EXISTS playlists (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    type TEXT DEFAULT 'user',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS playlist_songs (
-    playlist_id INTEGER REFERENCES playlists(id) ON DELETE CASCADE,
-    song_id TEXT,
-    song_name TEXT,
-    artist TEXT,
-    album TEXT,
-    cover_url TEXT,
-    sort_order INTEGER DEFAULT 0,
-    PRIMARY KEY (playlist_id, song_id)
-  );
-
   CREATE TABLE IF NOT EXISTS chat_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
@@ -163,11 +145,10 @@ function tableHasColumn(table, col) {
   } catch { return false; }
 }
 
-// play_history / chat_messages / playlists 都加 user_id 列（默认 1）
+// play_history / chat_messages 都加 user_id 列（默认 1）
 const safeAlter = (sql) => { try { db.exec(sql); } catch (_) { /* 已存在 */ } };
 safeAlter('ALTER TABLE play_history ADD COLUMN user_id INTEGER DEFAULT 1');
 safeAlter('ALTER TABLE chat_messages ADD COLUMN user_id INTEGER DEFAULT 1');
-safeAlter('ALTER TABLE playlists ADD COLUMN user_id INTEGER DEFAULT 1');
 
 // favorites: 单字段 PK 改成 (user_id, song_id) 复合 PK，必须重建
 if (!tableHasColumn('favorites', 'user_id')) {
@@ -531,14 +512,11 @@ function extractTextFromBlocks(blocks) {
   }
   return parts.filter(Boolean).join('\n').trim();
 }
-// expect: 'object' (默认，找 {...}) 或 'array' (找 [...])。
-// 'array' 模式抠 [...]，给返数组的 LLM 调用用。
-function extractJsonFromBlocks(blocks, expect = 'object') {
+function extractJsonFromBlocks(blocks) {
   const text = extractTextFromBlocks(blocks);
   if (!text) return { text: '', json: null };
   try { return { text, json: JSON.parse(text) }; } catch {}
-  const re = expect === 'array' ? /\[[\s\S]*\]/ : /\{[\s\S]*\}/;
-  const m = text.match(re);
+  const m = text.match(/\{[\s\S]*\}/);
   if (m) {
     try { return { text, json: JSON.parse(m[0]) }; } catch {}
   }
@@ -655,49 +633,6 @@ app.post('/api/history', (req, res) => {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `).run(uid, song_id, song_name, artist, album, cover_url, mode || null, newScore);
   res.json({ ok: true, id: r.lastInsertRowid, score: newScore });
-});
-
-// ========== 歌单 API ==========
-app.get('/api/playlists', (req, res) => {
-  const uid = userIdOf(req);
-  const rows = db.prepare('SELECT * FROM playlists WHERE user_id=? ORDER BY created_at DESC').all(uid);
-  res.json(rows);
-});
-
-app.post('/api/playlists', (req, res) => {
-  const uid = userIdOf(req);
-  const { name, type } = req.body;
-  const result = db.prepare('INSERT INTO playlists (user_id, name, type) VALUES (?, ?, ?)').run(uid, name, type || 'user');
-  res.json({ ok: true, id: result.lastInsertRowid });
-});
-
-app.get('/api/playlists/:id', (req, res) => {
-  const uid = userIdOf(req);
-  const playlist = db.prepare('SELECT * FROM playlists WHERE id=? AND user_id=?').get(req.params.id, uid);
-  if (!playlist) return res.status(404).json({ error: '歌单不存在或无权访问' });
-  const songs = db.prepare('SELECT * FROM playlist_songs WHERE playlist_id=? ORDER BY sort_order').all(req.params.id);
-  res.json({ ...playlist, songs });
-});
-
-app.post('/api/playlists/:id/songs', (req, res) => {
-  const uid = userIdOf(req);
-  const owner = db.prepare('SELECT user_id FROM playlists WHERE id=?').get(req.params.id);
-  if (!owner || owner.user_id !== uid) return res.status(403).json({ error: '无权操作' });
-  const { song_id, song_name, artist, album, cover_url } = req.body;
-  const maxOrder = db.prepare('SELECT MAX(sort_order) as m FROM playlist_songs WHERE playlist_id=?').get(req.params.id);
-  const order = (maxOrder?.m || 0) + 1;
-  db.prepare('INSERT OR REPLACE INTO playlist_songs (playlist_id, song_id, song_name, artist, album, cover_url, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    .run(req.params.id, song_id, song_name, artist, album, cover_url, order);
-  res.json({ ok: true });
-});
-
-app.delete('/api/playlists/:id/songs/:songId', (req, res) => {
-  const uid = userIdOf(req);
-  const owner = db.prepare('SELECT user_id FROM playlists WHERE id=?').get(req.params.id);
-  if (!owner || owner.user_id !== uid) return res.status(403).json({ error: '无权操作' });
-  db.prepare('DELETE FROM playlist_songs WHERE playlist_id=? AND song_id=?')
-    .run(req.params.id, req.params.songId);
-  res.json({ ok: true });
 });
 
 // ========== 偏好 API ==========
