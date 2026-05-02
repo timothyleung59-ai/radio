@@ -1277,16 +1277,30 @@ app.post('/api/radio/next', async (req, res) => {
 
     const habit = buildHabitSnapshot(userId);
 
-    // 历史 50 → 20，前 20 已经够覆盖"近期"语义
-    // 历史 dedup 池：拉 40 行（client 还会再带 ~10 条 recent，总 dedup 池约 50）。
-    // 之前砍到 20 是 prefill 优化，但用户反馈"几首内重复"——这条最影响体感
-    const dbRecent = db.prepare(`SELECT song_name, artist FROM play_history WHERE user_id=? ORDER BY id DESC LIMIT 40`).all(userId);
-    const noRepeatMap = new Map();
+    // dedup 池：80 行历史 + client 带的 recent。80 行覆盖 ~一个 session 一晚的听歌量
+    const dbRecent = db.prepare(`SELECT song_id, song_name, artist FROM play_history WHERE user_id=? ORDER BY id DESC LIMIT 80`).all(userId);
+    // normalized 串：去括号注释（"(Live)" "(Remix)" "feat. X"）+ 小写 + 去空白
+    const normalizeKey = (s) => (s || '').toString()
+      .toLowerCase()
+      .replace(/[（(][^）)]*[）)]/g, '')      // 去括号
+      .replace(/feat\.?\s+[^,，;]+/gi, '')   // 去 feat. xxx
+      .replace(/\s+/g, '')
+      .trim();
+    const noRepeatMap = new Map();   // normalizedKey -> 显示标签
+    const playedIdSet = new Set();   // netease song_id 集合（数字字符串）
     for (const r of dbRecent) {
-      if (r.song_name) noRepeatMap.set(`${r.song_name}|${r.artist || ''}`, `《${r.song_name}》${r.artist || ''}`);
+      if (r.song_name) {
+        const k = `${normalizeKey(r.song_name)}|${normalizeKey(r.artist)}`;
+        noRepeatMap.set(k, `《${r.song_name}》${r.artist || ''}`);
+      }
+      if (r.song_id) playedIdSet.add(String(r.song_id));
     }
     for (const r of recentPlayed) {
-      if (r.name) noRepeatMap.set(`${r.name}|${r.artist || ''}`, `《${r.name}》${r.artist || ''}`);
+      if (r.name) {
+        const k = `${normalizeKey(r.name)}|${normalizeKey(r.artist)}`;
+        noRepeatMap.set(k, `《${r.name}》${r.artist || ''}`);
+      }
+      if (r.id) playedIdSet.add(String(r.id));
     }
     const noRepeatLabels = Array.from(noRepeatMap.values());
 
@@ -1369,25 +1383,61 @@ ${introSpec === null ? '- intro 字段必须是空字符串 ""（用户关闭了
     const userPrompt = ctx.join('\n\n');
 
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });
-    const response = await anthropic.messages.create({
-      model: process.env.ANTHROPIC_MODEL,
-      max_tokens: 2048,
-      system: sysPrompt,
-      thinking: { type: 'disabled' },     // 关 reasoning 通道，挑歌任务靠 prompt + JSON schema 就够了
-      messages: [{ role: 'user', content: userPrompt }]
-    });
-    const blocks = response.content || [];
-    const { text, json: parsed } = extractJsonFromBlocks(blocks);
-    if (!parsed?.song?.name) {
-      console.warn('radio/next: AI 返回无法解析。raw blocks:', JSON.stringify(blocks).slice(0, 500));
-      return res.status(502).json({ error: 'AI 返回格式异常', raw: text.slice(0, 300), blocks: blocks.length });
+
+    // LLM 重试循环：post-resolve 双重 dedup（song_id + normalized name）。
+    // sysPrompt 写了"绝对禁止"但 LLM 偶尔不听；命中重复就拉回来再选，最多 3 次
+    const MAX_ATTEMPTS = 3;
+    let parsed = null;
+    let resolved = null;
+    let lastBadPick = null;
+    let lastRawText = '';
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const promptWithFeedback = userPrompt + (lastBadPick
+        ? `\n\n【上一轮你刚选了《${lastBadPick.name}》— ${lastBadPick.artist}，这首在【近期已听】里！这次必须挑一首跟它不同艺人/不同歌的】`
+        : '');
+      const response = await anthropic.messages.create({
+        model: process.env.ANTHROPIC_MODEL,
+        max_tokens: 2048,
+        system: sysPrompt,
+        thinking: { type: 'disabled' },
+        messages: [{ role: 'user', content: promptWithFeedback }]
+      });
+      const blocks = response.content || [];
+      const xr = extractJsonFromBlocks(blocks);
+      lastRawText = xr.text;
+      const candidate = xr.json;
+      if (!candidate?.song?.name) {
+        console.warn(`[radio/next] attempt ${attempt} 解析失败`);
+        continue;
+      }
+      const r = await resolveSong(candidate.song);
+      if (!r?.id) {
+        console.warn(`[radio/next] attempt ${attempt} 网易云未找到《${candidate.song.name}》`);
+        lastBadPick = candidate.song;
+        continue;
+      }
+      // post-resolve dedup
+      const dupById = playedIdSet.has(String(r.id));
+      const dupByName = noRepeatMap.has(`${normalizeKey(r.name)}|${normalizeKey(r.artist)}`);
+      if (dupById || dupByName) {
+        console.warn(`[radio/next] attempt ${attempt} 选到重复：《${r.name}》— ${r.artist} (id=${r.id}, dupById=${dupById}, dupByName=${dupByName})`);
+        lastBadPick = { name: r.name, artist: r.artist };
+        continue;
+      }
+      parsed = candidate;
+      resolved = r;
+      if (attempt > 1) console.info(`[radio/next] attempt ${attempt} 成功`);
+      break;
     }
 
-    // 网易云搜索补全真实数据
-    const resolved = await resolveSong(parsed.song);
-    if (!resolved?.id) return res.status(404).json({ error: '网易云未找到这首歌', song: parsed.song });
+    if (!parsed?.song?.name) {
+      console.warn('radio/next: AI 反复无法解析。raw:', lastRawText.slice(0, 300));
+      return res.status(502).json({ error: 'AI 返回格式异常' });
+    }
+    if (!resolved?.id) {
+      return res.status(404).json({ error: 'AI 反复选到重复或网易云没有的歌，请稍后再试' });
+    }
 
-    // 用户关 intro 时强制空，无视 LLM
     const finalIntro = introSpec === null
       ? ''
       : (parsed.intro || `下面为你播放${resolved.artist}的《${resolved.name}》，请欣赏。`);
