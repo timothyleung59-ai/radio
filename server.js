@@ -1584,8 +1584,8 @@ async function inferMoodFromUser(userId, input) {
 }
 
 async function inferMoodFromChat(userId) {
-  const cutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
-  const chats = db.prepare(`SELECT role, content, created_at FROM chat_messages WHERE user_id=? AND created_at > ? ORDER BY id DESC LIMIT 12`).all(userId, cutoff).reverse();
+  // 同 playback：用 SQLite datetime() 避开 JS ISO 格式跟列空格格式的 string 比较坑
+  const chats = db.prepare(`SELECT role, content, created_at FROM chat_messages WHERE user_id=? AND created_at > datetime('now', '-30 minutes') ORDER BY id DESC LIMIT 12`).all(userId).reverse();
   if (chats.length < 2) return null;
   const dialog = chats.map(c => `${c.role === 'user' ? '听众' : 'DJ'}: ${c.content.slice(0, 120)}`).join('\n');
   const cfg = getUserConfig(userId);
@@ -1595,8 +1595,11 @@ async function inferMoodFromChat(userId) {
 }
 
 async function inferMoodFromPlayback(userId) {
-  const cutoff = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-  const plays = db.prepare(`SELECT song_name, artist, played_at FROM play_history WHERE user_id=? AND played_at > ? ORDER BY id ASC LIMIT 60`).all(userId, cutoff);
+  // SQLite 的 played_at 是 'YYYY-MM-DD HH:MM:SS'（空格分隔），而 JS 的
+  // toISOString 是 'YYYY-MM-DDTHH:MM:SS.sssZ'。string 比较里 ' '(32) < 'T'(84)，
+  // 所以 played_at > cutoff 永远 false → 0 行 → 心情永远推不出来。
+  // 用 SQLite 自己的 datetime() 函数直接算 cutoff，跟列的格式天然一致。
+  const plays = db.prepare(`SELECT song_name, artist, played_at FROM play_history WHERE user_id=? AND played_at > datetime('now', '-60 minutes') ORDER BY id ASC LIMIT 60`).all(userId);
   if (plays.length < 2) return null;
   let skipped = 0;
   let totalSpan = 0;
@@ -2085,8 +2088,7 @@ async function runTasteProfile(userId = 1) {
   markStart('tasteProfile');
   try {
     if (!process.env.ANTHROPIC_API_KEY) throw new Error('未配置 AI Key');
-    const cutoff = new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString();
-    const history = db.prepare('SELECT song_name, artist FROM play_history WHERE user_id=? AND played_at > ? ORDER BY played_at DESC LIMIT 200').all(userId, cutoff);
+    const history = db.prepare(`SELECT song_name, artist FROM play_history WHERE user_id=? AND played_at > datetime('now', '-3 days') ORDER BY played_at DESC LIMIT 200`).all(userId);
     const favs = db.prepare('SELECT song_name, artist FROM favorites WHERE user_id=? ORDER BY added_at DESC LIMIT 10').all(userId);
     const cfg = getUserConfig(userId);
 
@@ -2146,12 +2148,11 @@ async function autoLearnModeFromHistory(modeKey, userId = 1) {
   if (!ALLOWED_MODE_KEYS.includes(modeKey)) return { ok: false, error: '未知模式' };
   if (!process.env.ANTHROPIC_API_KEY) return { ok: false, error: '未配置 AI Key' };
 
-  const cutoff = new Date(Date.now() - 14 * 24 * 3600 * 1000).toISOString();
   // 只看真听过的（score>=1），跳过的歌不影响模式偏好
-  let rows = db.prepare(`SELECT song_name, artist, played_at FROM play_history WHERE user_id=? AND mode=? AND played_at > ? AND COALESCE(score,0) >= 1 ORDER BY played_at DESC LIMIT 200`).all(userId, modeKey, cutoff);
+  let rows = db.prepare(`SELECT song_name, artist, played_at FROM play_history WHERE user_id=? AND mode=? AND played_at > datetime('now', '-14 days') AND COALESCE(score,0) >= 1 ORDER BY played_at DESC LIMIT 200`).all(userId, modeKey);
 
   if (modeKey === 'default' && rows.length < 3) {
-    rows = db.prepare(`SELECT song_name, artist, played_at FROM play_history WHERE user_id=? AND (mode=? OR mode IS NULL) AND played_at > ? AND COALESCE(score,0) >= 1 ORDER BY played_at DESC LIMIT 200`).all(userId, modeKey, cutoff);
+    rows = db.prepare(`SELECT song_name, artist, played_at FROM play_history WHERE user_id=? AND (mode=? OR mode IS NULL) AND played_at > datetime('now', '-14 days') AND COALESCE(score,0) >= 1 ORDER BY played_at DESC LIMIT 200`).all(userId, modeKey);
   }
 
   if (rows.length < 3) return { ok: false, error: `数据不足（${rows.length} 条），暂不更新` };
