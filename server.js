@@ -532,7 +532,7 @@ function extractTextFromBlocks(blocks) {
   return parts.filter(Boolean).join('\n').trim();
 }
 // expect: 'object' (默认，找 {...}) 或 'array' (找 [...])。
-// daily-playlist 这种返数组的 LLM 调用也走这里，保持 6 个调用点统一。
+// 'array' 模式抠 [...]，给返数组的 LLM 调用用。
 function extractJsonFromBlocks(blocks, expect = 'object') {
   const text = extractTextFromBlocks(blocks);
   if (!text) return { text: '', json: null };
@@ -1990,7 +1990,6 @@ function saveSchedulerStatus() {
 }
 
 let schedulerStatus = loadSchedulerStatus() || {
-  dailyPlaylist: { lastRun: null, status: 'idle' },
   moodCheck: { lastRun: null, status: 'idle' },
   modeLearn: { lastRun: null, status: 'idle', perMode: {} },
   tasteProfile: { lastRun: null, status: 'idle' }
@@ -2018,53 +2017,7 @@ function markError(taskKey, err) {
   saveSchedulerStatus();
 }
 
-// === 任务 1：每日歌单推荐（每日 07:00） ===
-async function runDailyPlaylist(userId = 1) {
-  if (schedulerStatus.dailyPlaylist.status === 'running') return { ok: false, error: 'already running' };
-  console.log(`[task] daily-playlist start user=${userId}`);
-  markStart('dailyPlaylist');
-  try {
-    if (!process.env.ANTHROPIC_API_KEY) throw new Error('未配置 AI Key');
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });
-    const history = db.prepare('SELECT * FROM play_history WHERE user_id=? AND COALESCE(score,0) >= 1 ORDER BY played_at DESC LIMIT 50').all(userId);
-    const cfg = getUserConfig(userId);
-
-    const prompt = `根据以下信息，推荐今日歌单（10首歌），严格输出 JSON 数组（无 markdown 包裹）：
-[{"id":"网易云歌曲ID（可空字符串，会自动搜）","name":"歌名","artist":"艺术家","album":"专辑","cover":"封面URL（可空）"}]
-
-${cfg.taste ? '品味偏好：' + cfg.taste : ''}
-最近听歌记录：${history.map(h => h.song_name + ' - ' + h.artist).join(', ')}`;
-
-    const response = await anthropic.messages.create({
-      model: process.env.ANTHROPIC_MODEL,
-      max_tokens: 1536,
-      messages: [{ role: 'user', content: prompt }]
-    });
-    const blocks = response.content || [];
-    const { json: songs } = extractJsonFromBlocks(blocks, 'array');
-    if (!Array.isArray(songs) || songs.length === 0) throw new Error('AI 返回无法解析');
-
-    const result = db.prepare('INSERT INTO playlists (user_id, name, type) VALUES (?, ?, ?)').run(userId, '今日推荐', 'daily');
-    const playlistId = result.lastInsertRowid;
-    // INSERT OR IGNORE 避免 song_id 为空 / 重复时撞 UNIQUE 索引
-    const stmt = db.prepare('INSERT OR IGNORE INTO playlist_songs (playlist_id, song_id, song_name, artist, album, cover_url, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)');
-    songs.forEach((s, i) => {
-      // 如果 AI 没给 id，用 sort_order 占位，保证唯一
-      const sid = s.id ? String(s.id) : `_ai_${i}`;
-      stmt.run(playlistId, sid, s.name, s.artist, s.album || '', s.cover || '', i);
-    });
-
-    markDone('dailyPlaylist');
-    console.log(`[task] daily-playlist 完成（${songs.length} 首）`);
-    return { ok: true, count: songs.length };
-  } catch (err) {
-    console.error('[task] daily-playlist 失败:', err.message);
-    markError('dailyPlaylist', err);
-    return { ok: false, error: err.message };
-  }
-}
-
-// === 任务 2：每小时情绪检查 ===
+// === 任务 1：每小时情绪检查 ===
 async function runMoodCheck(userId = 1) {
   if (schedulerStatus.moodCheck.status === 'running') return { ok: false, error: 'already running' };
   console.log(`[task] mood-check start user=${userId}`);
@@ -2362,14 +2315,12 @@ function runForAllUsers(label, taskFn) {
 }
 
 // === Cron 注册（多用户 loop）===
-cron.schedule('0 7 * * *', runForAllUsers('daily-playlist', runDailyPlaylist));
 cron.schedule('0 7 * * *', runForAllUsers('taste-profile', runTasteProfile));
 cron.schedule('0 * * * *', runForAllUsers('mood-check',    runMoodCheck));
 cron.schedule('0 3 * * *', runForAllUsers('mode-learn',    runModeLearn));
 
 // === 任务注册表（手动 trigger 用，per-user，userId 由 caller 传入） ===
 const TASK_REGISTRY = {
-  'daily-playlist': runDailyPlaylist,
   'mood': runMoodCheck,
   'mode-learn': runModeLearn,
   'taste-profile': runTasteProfile
@@ -2385,9 +2336,6 @@ setTimeout(() => {
   console.log('[catchup] 检查启动后是否需要补跑过期任务...');
   if (shouldCatchup(schedulerStatus.moodCheck.lastRun, 60 * 60 * 1000)) {
     console.log('[catchup] mood'); runForAllUsers('mood-check', runMoodCheck)().catch(() => {});
-  }
-  if (shouldCatchup(schedulerStatus.dailyPlaylist.lastRun, 24 * 60 * 60 * 1000)) {
-    console.log('[catchup] daily-playlist'); runForAllUsers('daily-playlist', runDailyPlaylist)().catch(() => {});
   }
   if (shouldCatchup(schedulerStatus.tasteProfile.lastRun, 24 * 60 * 60 * 1000)) {
     console.log('[catchup] taste-profile'); runForAllUsers('taste-profile', runTasteProfile)().catch(() => {});
@@ -2407,14 +2355,6 @@ app.post('/api/radio/modes/:key/learn', async (req, res) => {
 // ========== 定时任务 API ==========
 app.get('/api/scheduler/status', (req, res) => {
   res.json(schedulerStatus);
-});
-
-app.get('/api/scheduler/daily-playlist', (req, res) => {
-  const userId = userIdOf(req);
-  const playlist = db.prepare("SELECT * FROM playlists WHERE user_id=? AND type='daily' ORDER BY created_at DESC LIMIT 1").get(userId);
-  if (!playlist) return res.json(null);
-  const songs = db.prepare('SELECT * FROM playlist_songs WHERE playlist_id = ? ORDER BY sort_order').all(playlist.id);
-  res.json({ ...playlist, songs });
 });
 
 app.get('/api/scheduler/mood', (req, res) => {
