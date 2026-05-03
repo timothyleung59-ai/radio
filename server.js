@@ -2046,6 +2046,20 @@ ${numbered}
   }
 });
 
+// ========== Playlist CRUD ==========
+// 列出当前用户所有歌单（含 song count）
+app.get('/api/playlists', (req, res) => {
+  const uid = userIdOf(req);
+  const rows = db.prepare(`
+    SELECT p.id, p.name, p.mode, p.created_at, p.updated_at,
+           (SELECT COUNT(*) FROM user_playlist_songs WHERE playlist_id = p.id) AS song_count
+    FROM user_playlists p
+    WHERE p.user_id = ?
+    ORDER BY p.updated_at DESC
+  `).all(uid);
+  res.json({ playlists: rows });
+});
+
 // ========== 电台情绪 (current_mood) ==========
 // 优先级链：用户主动输入 > 跟 DJ 聊天上下文 > 最近一小时播放行为
 // 存储格式：{ mood, genre, message, source: 'user'|'chat'|'playback', set_at: ISO, user_input?: string }
