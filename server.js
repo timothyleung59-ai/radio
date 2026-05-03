@@ -2060,6 +2060,27 @@ app.get('/api/playlists', (req, res) => {
   res.json({ playlists: rows });
 });
 
+// 新建歌单 { name?, mode } → 返回 { id, name, mode }
+// 名字为空时自动生成 "我的{mode label}歌单 #{N}"
+app.post('/api/playlists', (req, res) => {
+  const uid = userIdOf(req);
+  const mode = req.body?.mode;
+  if (!mode || !RADIO_MODES[mode]) {
+    return res.status(400).json({ error: 'mode 必填且必须是 6 个 RADIO_MODES 之一' });
+  }
+  let name = (req.body?.name || '').toString().trim().slice(0, 50);
+  if (!name) {
+    const cnt = db.prepare(
+      'SELECT COUNT(*) AS n FROM user_playlists WHERE user_id=? AND mode=?'
+    ).get(uid, mode).n;
+    name = `我的${RADIO_MODES[mode].label}歌单 #${cnt + 1}`;
+  }
+  const r = db.prepare(
+    'INSERT INTO user_playlists (user_id, name, mode) VALUES (?, ?, ?)'
+  ).run(uid, name, mode);
+  res.json({ id: r.lastInsertRowid, name, mode });
+});
+
 // ========== 电台情绪 (current_mood) ==========
 // 优先级链：用户主动输入 > 跟 DJ 聊天上下文 > 最近一小时播放行为
 // 存储格式：{ mood, genre, message, source: 'user'|'chat'|'playback', set_at: ISO, user_input?: string }
