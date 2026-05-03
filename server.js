@@ -1282,6 +1282,20 @@ app.post('/api/radio/next', async (req, res) => {
     const currentSongState = VALID_SONG_STATES.includes(req.body?.currentSongState) ? req.body.currentSongState : 'unknown';
     // prevMode = 上一首歌当时所在的模式。客户端切模式后传过来用来判断要不要继续承接
     const prevMode = req.body?.prevMode && RADIO_MODES[req.body.prevMode] ? req.body.prevMode : null;
+    // 临时模式（搜索页的"按 BPM/语言/年代/类型筛"）：覆盖 mode.style，可选覆盖 mode.patterTone
+    // 客户端把筛选条件拼成自然语言喂进来，server 不解析、原样塞进 prompt
+    const adhocStyle = typeof req.body?.adhocStyle === 'string' && req.body.adhocStyle.trim().length > 0
+      ? req.body.adhocStyle.trim().slice(0, 400)
+      : null;
+    const adhocPatterTone = typeof req.body?.adhocPatterTone === 'string' && req.body.adhocPatterTone.trim().length > 0
+      ? req.body.adhocPatterTone.trim().slice(0, 400)
+      : null;
+    // 用临时风格覆盖 mode 的硬编码 style/tone（如果传了）
+    const effectiveMode = (adhocStyle || adhocPatterTone) ? Object.assign({}, mode, {
+      style: adhocStyle || mode.style,
+      patterTone: adhocPatterTone || mode.patterTone,
+      label: mode.label + '（临时筛选）'
+    }) : mode;
 
     // 决定是否承接上一首：跨模式切换 / 秒切 / 概率掷骰
     const carryPrev = promptBuilder.shouldCarryPrevSong({
@@ -1598,7 +1612,7 @@ app.post('/api/radio/next', async (req, res) => {
     console.info(`[radio/metrics] event=pool user=${userId} size=${candidatePool.length} use_pool=${usePool} sources={${poolDist}} unique_artists=${uniqueArtists} explore_count=${exploreCount}`);
 
     const listenerNarrative = promptBuilder.buildListenerNarrative({
-      habit, mode, modeKey, curMood,
+      habit, mode: effectiveMode, modeKey, curMood,
       currentSong: effectivePrevSong,
       currentSongState: effectivePrevSong ? currentSongState : 'unknown'
     });
@@ -1625,7 +1639,7 @@ app.post('/api/radio/next', async (req, res) => {
         ctx.push(`🚫 这些艺人已超配额（10/30 首/30 天三档），下一首禁选他们：${recentArtistList.join(' / ')}`);
       }
     }
-    ctx.push(`【模式 / 风格 / 语调】${mode.label} · ${mode.style} · ${mode.patterTone}`);
+    ctx.push(`【模式 / 风格 / 语调】${effectiveMode.label} · ${effectiveMode.style} · ${effectiveMode.patterTone}`);
     // 只在 carryPrev 为 true 时把上一首塞进 prompt——跨模式/秒切/概率独立开场都不传
     const prevSongLine = promptBuilder.formatPrevSongLine(effectivePrevSong, currentSongState);
     if (prevSongLine) ctx.push(prevSongLine);
@@ -1651,7 +1665,7 @@ app.post('/api/radio/next', async (req, res) => {
 
     // ─── DJ 串词指南（intro 启用时才加） ───
     const djGuide = promptBuilder.buildDjIntroGuide({
-      lengthSpec: introSpec, mode,
+      lengthSpec: introSpec, mode: effectiveMode,
       currentSong: effectivePrevSong,    // 不承接时不让 DJ 写"刚听完..."
       recentIntros
     });
@@ -1911,6 +1925,95 @@ app.post('/api/dj/intro', async (req, res) => {
     res.json({ intro });
   } catch (e) {
     console.error('dj/intro 失败:', e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ========== AI 帮一个用户歌单写串词序列 ==========
+// 客户端：用户多选歌 / 自己排好歌单 → POST { songs: [...], mode? } → 拿一组 intros 数组
+// 输出 intros[i] 跟 songs[i] 一一对应；intros[0] 是开场，后面每首承接前一首
+// 用 Aidio FM Prompt 标准框架（详见 docs/prompt-architecture.md）
+app.post('/api/dj/playlist-intros', async (req, res) => {
+  try {
+    const userId = userIdOf(req);
+    const songs = Array.isArray(req.body?.songs) ? req.body.songs.slice(0, 30) : [];
+    if (songs.length === 0) return res.status(400).json({ error: 'songs 必填且非空' });
+    const modeKey = req.body?.mode && RADIO_MODES[req.body.mode] ? req.body.mode : 'default';
+    const mode = RADIO_MODES[modeKey];
+
+    let curMood = null;
+    try { curMood = await resolveMood({ userId }); } catch {}
+    const habit = buildHabitSnapshot(userId);
+    const userCfg = getUserConfig(userId);
+
+    const lenKey = (req.body?.length || 'medium').toString().toLowerCase();
+    const lenSpec = lenKey === 'long' ? '60-100 字'
+      : lenKey === 'short' ? '15-25 字'
+      : '30-50 字';
+
+    const ctx = [];
+    // 第 1 层：歌单本身
+    const numbered = songs.map((s, i) => `${i + 1}. 《${s.name}》— ${s.artist || '未知'}`).join('\n');
+    ctx.push(`${promptBuilder.formatLayer1Header()}
+【歌单（${songs.length} 首，按播放顺序）】
+${numbered}
+【模式 / 风格 / 语调】${mode.label} · ${mode.style} · ${mode.patterTone}`);
+
+    // 第 2 层：当下场景
+    const narrative = promptBuilder.buildListenerNarrative({
+      habit, mode, modeKey, curMood, currentSong: null, currentSongState: 'unknown'
+    });
+    const sceneLayer = promptBuilder.buildSceneLayer(narrative);
+    if (sceneLayer) ctx.push(sceneLayer);
+
+    // 第 3 层：长期背景
+    const bgLayer = promptBuilder.buildBackgroundLayer({
+      readModeMd, userId, modeKey,
+      taste: userCfg.taste,
+      includeFavs: false, includeTags: false
+    });
+    if (bgLayer) ctx.push(bgLayer);
+
+    // DJ 串词指南
+    ctx.push(`════════ DJ 串词指南 ════════
+• 单条长度：${lenSpec}
+• 语调：${mode.patterTone}
+• intros[0] 是开场白（介绍这个歌单的整体感觉，不指特定歌）
+• intros[i] (i>=1) 承接 intros[i-1] 的歌：可以做风格转折/情绪过渡/艺人对比
+• 每条都按【DJ 说话语调】写，禁止"现在为您播放""敬请收听"这种主持腔`);
+
+    const sysPrompt = `你是 Aidio FM 的 AI 电台 DJ。听众给了你一个 ${songs.length} 首的歌单，请按播放顺序为每首歌写一段 DJ 串场词。
+
+【硬规则】
+1. 严格输出 JSON：{"intros": ["开场", "第1首串词", "第2首串词", ...]}
+   intros 数组长度必须 = ${songs.length} + 1（多 1 个开场）
+2. intros[0] = 开场白（不指特定歌，聊整个歌单的感觉）
+3. intros[i] (i>=1) 串到歌单的第 i 首
+4. 每段按【DJ 串词指南】里的长度、语调
+5. 第一个字符必须是 "{"，不要 markdown / 思考过程`;
+
+    const userPrompt = ctx.join('\n\n');
+    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });
+    const response = await anthropic.messages.create({
+      model: process.env.ANTHROPIC_MODEL,
+      max_tokens: 4096,
+      system: sysPrompt,
+      thinking: { type: 'disabled' },
+      messages: [{ role: 'user', content: userPrompt }]
+    });
+    const blocks = response.content || [];
+    const { json: parsed } = extractJsonFromBlocks(blocks);
+    const intros = Array.isArray(parsed?.intros) ? parsed.intros : null;
+    if (!intros || intros.length !== songs.length + 1) {
+      // 兜底：按歌单生成简单串词
+      const fallback = ['给你拼一个歌单：'].concat(
+        songs.map(s => `下面这首：${s.artist || ''}的《${s.name}》。`)
+      );
+      return res.json({ intros: fallback, fallback: true });
+    }
+    res.json({ intros: intros.map(s => String(s).trim()) });
+  } catch (e) {
+    console.error('dj/playlist-intros 失败:', e);
     res.status(500).json({ error: e.message });
   }
 });

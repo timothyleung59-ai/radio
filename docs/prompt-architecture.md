@@ -111,9 +111,20 @@ ctx.push(promptBuilder.buildDjIntroGuide({
 |---|---|---|
 | `/api/radio/next` | 选下一首 | ✅ 已迁移 |
 | `/api/dj/intro` | 让 DJ 介绍当前歌 | ✅ 已迁移 |
+| `/api/dj/playlist-intros` | 给一组歌生成串词序列 | ✅ 已迁移 |
 | `/api/chat/*` | 用户聊天 | ⏳ 待迁移（次优先级，prompt 性质不同） |
 | 后台 taste analyzer | 长期品味画像生成 | ❌ 不适用（独立分析任务，无 ctx） |
 | 后台 mode rules 提炼 | mode.md 规律提炼 | ❌ 不适用（独立分析任务） |
+
+### 临时模式（adhocStyle / adhocPatterTone）
+
+`/api/radio/next` 接受两个可选字段覆盖 mode 的硬编码 style/tone：
+- `adhocStyle`: 自然语言描述（≤400 字）。例如 `"中文民谣，2010 年代，BPM 70-100，吉他人声为主"`
+- `adhocPatterTone`: 自然语言描述（≤400 字）。可选
+
+用途：搜索页"按 BPM/语言/年代/类型筛"功能 —— 客户端把筛选 chips 拼成 adhocStyle 喂给 server，server 不解析、原样塞进 prompt。这样既不用改 RADIO_MODES 硬编码，又能让用户每次创造一个临时筛选维度。
+
+服务端在 `event=enter` 之后用 `effectiveMode = mode + override` 拼装，prompt 里 mode label 加 "（临时筛选）" 后缀让 AI 知道是临时态。
 
 ---
 
