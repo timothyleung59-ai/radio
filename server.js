@@ -2022,16 +2022,26 @@ ${numbered}
 
     const userPrompt = ctx.join('\n\n');
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, baseURL: process.env.ANTHROPIC_BASE_URL });
-    const response = await anthropic.messages.create({
-      model: process.env.ANTHROPIC_MODEL,
-      max_tokens: 4096,
-      system: sysPrompt,
-      thinking: { type: 'disabled' },
-      messages: [{ role: 'user', content: userPrompt }]
-    });
-    const blocks = response.content || [];
-    const { json: parsed } = extractJsonFromBlocks(blocks);
-    const intros = Array.isArray(parsed?.intros) ? parsed.intros : null;
+
+    let intros = null;
+    try {
+      const response = await anthropic.messages.create({
+        model: process.env.ANTHROPIC_MODEL,
+        max_tokens: 4096,
+        system: sysPrompt,
+        thinking: { type: 'disabled' },
+        messages: [{ role: 'user', content: userPrompt }]
+      }, { timeout: 30000 });
+      const blocks = response.content || [];
+      const { json: parsed } = extractJsonFromBlocks(blocks);
+      const parsedIntros = Array.isArray(parsed?.intros) ? parsed.intros : null;
+      if (parsedIntros && parsedIntros.length === songs.length + 1) {
+        intros = parsedIntros.map(s => String(s).trim());
+      }
+    } catch (e) {
+      console.warn('[dj/playlist-intros] LLM failed, using fallback:', e.message);
+    }
+
     if (!intros || intros.length !== songs.length + 1) {
       // 兜底：按歌单生成简单串词
       const fallback = ['给你拼一个歌单：'].concat(
@@ -2039,7 +2049,7 @@ ${numbered}
       );
       return res.json({ intros: fallback, fallback: true });
     }
-    res.json({ intros: intros.map(s => String(s).trim()) });
+    res.json({ intros });
   } catch (e) {
     console.error('dj/playlist-intros 失败:', e);
     res.status(500).json({ error: e.message });
