@@ -1280,9 +1280,17 @@ app.post('/api/radio/next', async (req, res) => {
     const queuePosition = Number.isInteger(req.body?.queuePosition) ? req.body.queuePosition : 0;
     const VALID_SONG_STATES = ['full', 'partial', 'early', 'unknown'];
     const currentSongState = VALID_SONG_STATES.includes(req.body?.currentSongState) ? req.body.currentSongState : 'unknown';
+    // prevMode = 上一首歌当时所在的模式。客户端切模式后传过来用来判断要不要继续承接
+    const prevMode = req.body?.prevMode && RADIO_MODES[req.body.prevMode] ? req.body.prevMode : null;
 
-    // 入口指标：每次 /api/radio/next 调用先打一条，便于关联同一请求的后续日志
-    console.info(`[radio/metrics] event=enter user=${userId} mode=${modeKey} recent=${recentPlayed.length} qpos=${queuePosition} state=${currentSongState} cur=${currentSong ? `${currentSong.name}/${currentSong.artist}` : 'null'}`);
+    // 决定是否承接上一首：跨模式切换 / 秒切 / 概率掷骰
+    const carryPrev = promptBuilder.shouldCarryPrevSong({
+      currentSong, prevMode, currentMode: modeKey, currentSongState, queuePosition
+    });
+    const effectivePrevSong = carryPrev ? currentSong : null;
+
+    // 入口指标
+    console.info(`[radio/metrics] event=enter user=${userId} mode=${modeKey} prev_mode=${prevMode || '-'} recent=${recentPlayed.length} qpos=${queuePosition} state=${currentSongState} carry=${carryPrev ? 1 : 0} cur=${currentSong ? `${currentSong.name}/${currentSong.artist}` : 'null'}`);
 
     // 该用户的聊天 / 收藏 / 历史（精简：减小 prefill，提速 1-2s）
     const recentChat = db.prepare('SELECT role, content FROM chat_messages WHERE user_id=? ORDER BY id DESC LIMIT 3').all(userId).reverse();
@@ -1442,7 +1450,7 @@ app.post('/api/radio/next', async (req, res) => {
     const POOL_TARGET = 30;
     const candidatePool = [];
     const poolSeenIds = new Set();
-    const poolSourceCounts = { simi: 0, history_high: 0 };
+    const poolSourceCounts = { simi: 0, history_high: 0, favorites: 0 };
     const tryAddToPool = (s, source) => {
       const sid = String(s.id || '');
       if (!sid || !s.name || !s.artist) return false;
@@ -1481,10 +1489,24 @@ app.post('/api/radio/next', async (req, res) => {
     if (currentSong?.id) simiSeedIds.push({ id: String(currentSong.id), label: 'simi-cur' });
     const dbSeedSet = new Set(simiSeedIds.map(s => s.id));
     for (const r of dbRecent) {
-      if (simiSeedIds.length >= 4) break;   // 最多 4 个种子（cur + 3）
+      if (simiSeedIds.length >= 4) break;   // cur + 3 recent
       if (!r.song_id || dbSeedSet.has(String(r.song_id))) continue;
       dbSeedSet.add(String(r.song_id));
       simiSeedIds.push({ id: String(r.song_id), label: 'simi-rec' });
+    }
+    // 加 2 首 favorites 作 simi 种子——让收藏的歌也能拓展邻接艺人，但不直接塞池
+    try {
+      const favSeeds = db.prepare(
+        `SELECT song_id FROM favorites WHERE user_id=? AND song_id IS NOT NULL ORDER BY RANDOM() LIMIT 2`
+      ).all(userId);
+      for (const f of favSeeds) {
+        if (simiSeedIds.length >= 6) break;
+        if (dbSeedSet.has(String(f.song_id))) continue;
+        dbSeedSet.add(String(f.song_id));
+        simiSeedIds.push({ id: String(f.song_id), label: 'simi-fav' });
+      }
+    } catch (e) {
+      console.warn('[radio/pool] fav seed query failed: ' + e.message);
     }
     if (simiSeedIds.length > 0) {
       const simiResults = await Promise.all(simiSeedIds.map(s => fetchSimiSongs(s.id, s.label)));
@@ -1536,6 +1558,33 @@ app.post('/api/radio/next', async (req, res) => {
       }
     }
 
+    // Source D: favorites 直接进池子——让用户收藏过的歌偶尔出现在选歌里。
+    // 数量克制（最多 5 首），避免池子过度倾向收藏让"新音乐视野"丢失。
+    try {
+      const favRows = db.prepare(`
+        SELECT song_id, song_name, artist, album, cover_url
+        FROM favorites
+        WHERE user_id=? AND song_id IS NOT NULL
+        ORDER BY RANDOM() LIMIT 12
+      `).all(userId);
+      let favAdded = 0;
+      const FAV_DIRECT_LIMIT = 5;
+      for (const r of favRows) {
+        if (favAdded >= FAV_DIRECT_LIMIT) break;
+        if (candidatePool.length >= POOL_TARGET) break;
+        const ok = tryAddToPool({
+          id: r.song_id,
+          name: r.song_name,
+          artist: r.artist,
+          album: r.album || '',
+          cover: r.cover_url || ''
+        }, 'favorites');
+        if (ok) favAdded++;
+      }
+    } catch (e) {
+      console.warn('[radio/pool] favorites query failed: ' + e.message);
+    }
+
     const usePool = candidatePool.length >= 5;
     const poolDist = Object.entries(poolSourceCounts).map(([k, v]) => `${k}:${v}`).join(',');
 
@@ -1549,7 +1598,9 @@ app.post('/api/radio/next', async (req, res) => {
     console.info(`[radio/metrics] event=pool user=${userId} size=${candidatePool.length} use_pool=${usePool} sources={${poolDist}} unique_artists=${uniqueArtists} explore_count=${exploreCount}`);
 
     const listenerNarrative = promptBuilder.buildListenerNarrative({
-      habit, mode, modeKey, curMood, currentSong, currentSongState
+      habit, mode, modeKey, curMood,
+      currentSong: effectivePrevSong,
+      currentSongState: effectivePrevSong ? currentSongState : 'unknown'
     });
 
     const ctx = [];
@@ -1575,7 +1626,8 @@ app.post('/api/radio/next', async (req, res) => {
       }
     }
     ctx.push(`【模式 / 风格 / 语调】${mode.label} · ${mode.style} · ${mode.patterTone}`);
-    const prevSongLine = promptBuilder.formatPrevSongLine(currentSong, currentSongState);
+    // 只在 carryPrev 为 true 时把上一首塞进 prompt——跨模式/秒切/概率独立开场都不传
+    const prevSongLine = promptBuilder.formatPrevSongLine(effectivePrevSong, currentSongState);
     if (prevSongLine) ctx.push(prevSongLine);
     if (queuePosition > 0) {
       ctx.push(`【⚙ 预取位置】这是预取队列的第 ${queuePosition + 1} 首（用户还没听到）。**主动切风格、切艺人**——预取链一直延续会让队列变成同艺人选集。`);
@@ -1599,7 +1651,9 @@ app.post('/api/radio/next', async (req, res) => {
 
     // ─── DJ 串词指南（intro 启用时才加） ───
     const djGuide = promptBuilder.buildDjIntroGuide({
-      lengthSpec: introSpec, mode, currentSong, recentIntros
+      lengthSpec: introSpec, mode,
+      currentSong: effectivePrevSong,    // 不承接时不让 DJ 写"刚听完..."
+      recentIntros
     });
     if (djGuide) ctx.push(djGuide);
 
