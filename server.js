@@ -2081,6 +2081,21 @@ app.post('/api/playlists', (req, res) => {
   res.json({ id: r.lastInsertRowid, name, mode });
 });
 
+// 单个歌单详情 + 全部歌曲（按 position 升序）
+app.get('/api/playlists/:id', (req, res) => {
+  const uid = userIdOf(req);
+  const id = parseInt(req.params.id, 10);
+  const p = db.prepare(
+    'SELECT id, name, mode, created_at, updated_at FROM user_playlists WHERE id=? AND user_id=?'
+  ).get(id, uid);
+  if (!p) return res.status(404).json({ error: '歌单不存在或无权限' });
+  const songs = db.prepare(`
+    SELECT position, song_id, song_name, artist, album, cover_url, added_at
+    FROM user_playlist_songs WHERE playlist_id=? ORDER BY position ASC
+  `).all(id);
+  res.json({ playlist: p, songs });
+});
+
 // ========== 电台情绪 (current_mood) ==========
 // 优先级链：用户主动输入 > 跟 DJ 聊天上下文 > 最近一小时播放行为
 // 存储格式：{ mood, genre, message, source: 'user'|'chat'|'playback', set_at: ISO, user_input?: string }
