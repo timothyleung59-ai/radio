@@ -2123,6 +2123,17 @@ app.patch('/api/playlists/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+// 删除歌单（CASCADE 自动删 songs）
+app.delete('/api/playlists/:id', (req, res) => {
+  const uid = userIdOf(req);
+  const id = parseInt(req.params.id, 10);
+  const r = db.prepare(
+    'DELETE FROM user_playlists WHERE id=? AND user_id=?'
+  ).run(id, uid);
+  if (r.changes === 0) return res.status(404).json({ error: '歌单不存在或无权限' });
+  res.json({ ok: true });
+});
+
 // ========== 电台情绪 (current_mood) ==========
 // 优先级链：用户主动输入 > 跟 DJ 聊天上下文 > 最近一小时播放行为
 // 存储格式：{ mood, genre, message, source: 'user'|'chat'|'playback', set_at: ISO, user_input?: string }
