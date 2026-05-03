@@ -2134,6 +2134,36 @@ app.delete('/api/playlists/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+// 加歌 { song: { id, name, artist, album?, cover? } } → { ok, position?, skipped? }
+// dedup: 同 song_id 已经在歌单 → 返 200 + skipped:true
+app.post('/api/playlists/:id/songs', (req, res) => {
+  const uid = userIdOf(req);
+  const id = parseInt(req.params.id, 10);
+  const song = req.body?.song;
+  if (!song?.id || !song?.name) return res.status(400).json({ error: 'song.id 和 song.name 必填' });
+
+  const exists = db.prepare(
+    'SELECT id FROM user_playlists WHERE id=? AND user_id=?'
+  ).get(id, uid);
+  if (!exists) return res.status(404).json({ error: '歌单不存在或无权限' });
+
+  const dup = db.prepare(
+    'SELECT position FROM user_playlist_songs WHERE playlist_id=? AND song_id=?'
+  ).get(id, String(song.id));
+  if (dup) return res.json({ ok: true, skipped: true, position: dup.position });
+
+  const maxPos = db.prepare(
+    'SELECT COALESCE(MAX(position), -1) AS m FROM user_playlist_songs WHERE playlist_id=?'
+  ).get(id).m;
+  const newPos = maxPos + 1;
+  db.prepare(`
+    INSERT INTO user_playlist_songs (playlist_id, position, song_id, song_name, artist, album, cover_url)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, newPos, String(song.id), song.name, song.artist || '', song.album || '', song.cover || '');
+  db.prepare('UPDATE user_playlists SET updated_at=CURRENT_TIMESTAMP WHERE id=?').run(id);
+  res.json({ ok: true, position: newPos });
+});
+
 // ========== 电台情绪 (current_mood) ==========
 // 优先级链：用户主动输入 > 跟 DJ 聊天上下文 > 最近一小时播放行为
 // 存储格式：{ mood, genre, message, source: 'user'|'chat'|'playback', set_at: ISO, user_input?: string }
