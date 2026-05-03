@@ -2085,6 +2085,7 @@ app.post('/api/playlists', (req, res) => {
 app.get('/api/playlists/:id', (req, res) => {
   const uid = userIdOf(req);
   const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'id 非法' });
   const p = db.prepare(
     'SELECT id, name, mode, created_at, updated_at FROM user_playlists WHERE id=? AND user_id=?'
   ).get(id, uid);
@@ -2100,6 +2101,7 @@ app.get('/api/playlists/:id', (req, res) => {
 app.patch('/api/playlists/:id', (req, res) => {
   const uid = userIdOf(req);
   const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'id 非法' });
   const exists = db.prepare(
     'SELECT id FROM user_playlists WHERE id=? AND user_id=?'
   ).get(id, uid);
@@ -2127,6 +2129,7 @@ app.patch('/api/playlists/:id', (req, res) => {
 app.delete('/api/playlists/:id', (req, res) => {
   const uid = userIdOf(req);
   const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'id 非法' });
   const r = db.prepare(
     'DELETE FROM user_playlists WHERE id=? AND user_id=?'
   ).run(id, uid);
@@ -2139,8 +2142,19 @@ app.delete('/api/playlists/:id', (req, res) => {
 app.post('/api/playlists/:id/songs', (req, res) => {
   const uid = userIdOf(req);
   const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'id 非法' });
   const song = req.body?.song;
-  if (!song?.id || !song?.name) return res.status(400).json({ error: 'song.id 和 song.name 必填' });
+  if (!song || typeof song !== 'object' || Array.isArray(song)) return res.status(400).json({ error: 'song 必填' });
+  const songIdValid = typeof song.id === 'string' || typeof song.id === 'number';
+  if (!songIdValid || !song.id) return res.status(400).json({ error: 'song.id 必填且为字符串或数字' });
+  if (typeof song.name !== 'string' || song.name.trim().length === 0) {
+    return res.status(400).json({ error: 'song.name 必填且为非空字符串' });
+  }
+  // Cap字符串长度
+  const songName = String(song.name).slice(0, 200);
+  const songArtist = (typeof song.artist === 'string' ? song.artist : '').slice(0, 200);
+  const songAlbum = (typeof song.album === 'string' ? song.album : '').slice(0, 200);
+  const songCover = (typeof song.cover === 'string' ? song.cover : '').slice(0, 500);
 
   const exists = db.prepare(
     'SELECT id FROM user_playlists WHERE id=? AND user_id=?'
@@ -2159,7 +2173,7 @@ app.post('/api/playlists/:id/songs', (req, res) => {
   db.prepare(`
     INSERT INTO user_playlist_songs (playlist_id, position, song_id, song_name, artist, album, cover_url)
     VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(id, newPos, String(song.id), song.name, song.artist || '', song.album || '', song.cover || '');
+  `).run(id, newPos, String(song.id), songName, songArtist, songAlbum, songCover);
   db.prepare('UPDATE user_playlists SET updated_at=CURRENT_TIMESTAMP WHERE id=?').run(id);
   res.json({ ok: true, position: newPos });
 });
@@ -2168,7 +2182,9 @@ app.post('/api/playlists/:id/songs', (req, res) => {
 app.delete('/api/playlists/:id/songs/:position', (req, res) => {
   const uid = userIdOf(req);
   const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'id 非法' });
   const pos = parseInt(req.params.position, 10);
+  if (!Number.isInteger(pos) || pos < 0) return res.status(400).json({ error: 'position 非法' });
 
   const exists = db.prepare(
     'SELECT id FROM user_playlists WHERE id=? AND user_id=?'
@@ -2195,6 +2211,7 @@ app.delete('/api/playlists/:id/songs/:position', (req, res) => {
 app.patch('/api/playlists/:id/reorder', (req, res) => {
   const uid = userIdOf(req);
   const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'id 非法' });
   const songIds = Array.isArray(req.body?.songIds) ? req.body.songIds.map(String) : null;
   if (!songIds) return res.status(400).json({ error: 'songIds 必填且为字符串数组' });
 
@@ -2203,14 +2220,15 @@ app.patch('/api/playlists/:id/reorder', (req, res) => {
   ).get(id, uid);
   if (!exists) return res.status(404).json({ error: '歌单不存在或无权限' });
 
-  const current = db.prepare(
-    'SELECT song_id FROM user_playlist_songs WHERE playlist_id=?'
-  ).all(id).map(r => r.song_id);
-  if (current.length !== songIds.length || !current.every(x => songIds.includes(x))) {
-    return res.status(400).json({ error: 'songIds 必须刚好是当前歌单所有 song_id 的一个排列' });
-  }
-
+  let validationError = null;
   const tx = db.transaction(() => {
+    const current = db.prepare(
+      'SELECT song_id FROM user_playlist_songs WHERE playlist_id=?'
+    ).all(id).map(r => r.song_id);
+    if (current.length !== songIds.length || !current.every(x => songIds.includes(x))) {
+      validationError = 'songIds 必须刚好是当前歌单所有 song_id 的一个排列';
+      return;
+    }
     // 用临时负数 position 避免 PRIMARY KEY 冲突
     db.prepare('UPDATE user_playlist_songs SET position = -position - 1 WHERE playlist_id=?').run(id);
     const stmt = db.prepare(
@@ -2220,6 +2238,7 @@ app.patch('/api/playlists/:id/reorder', (req, res) => {
     db.prepare('UPDATE user_playlists SET updated_at=CURRENT_TIMESTAMP WHERE id=?').run(id);
   });
   tx();
+  if (validationError) return res.status(400).json({ error: validationError });
   res.json({ ok: true });
 });
 
