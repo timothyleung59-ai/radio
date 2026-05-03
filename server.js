@@ -158,6 +158,34 @@ safeAlter('ALTER TABLE chat_messages ADD COLUMN user_id INTEGER DEFAULT 1');
 safeAlter('CREATE INDEX IF NOT EXISTS idx_ph_user_played ON play_history(user_id, played_at DESC)');
 safeAlter('CREATE INDEX IF NOT EXISTS idx_ph_user_score_played ON play_history(user_id, score, played_at DESC)');
 
+// 用户歌单（user_playlists / user_playlist_songs）
+db.exec(`
+  CREATE TABLE IF NOT EXISTS user_playlists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    mode TEXT NOT NULL CHECK(mode IN ('default','work','workout','drive','relax','sleep')),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_playlists_user ON user_playlists(user_id);
+
+  CREATE TABLE IF NOT EXISTS user_playlist_songs (
+    playlist_id INTEGER NOT NULL,
+    position INTEGER NOT NULL,
+    song_id TEXT NOT NULL,
+    song_name TEXT NOT NULL,
+    artist TEXT NOT NULL,
+    album TEXT,
+    cover_url TEXT,
+    added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (playlist_id, position),
+    FOREIGN KEY (playlist_id) REFERENCES user_playlists(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_playlist_songs_id ON user_playlist_songs(playlist_id);
+`);
+
 // favorites: 单字段 PK 改成 (user_id, song_id) 复合 PK，必须重建
 if (!tableHasColumn('favorites', 'user_id')) {
   console.log('[migration] rebuilding favorites with user_id...');
