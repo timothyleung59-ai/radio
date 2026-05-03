@@ -2096,6 +2096,33 @@ app.get('/api/playlists/:id', (req, res) => {
   res.json({ playlist: p, songs });
 });
 
+// 改名 / 改 mode { name?, mode? }
+app.patch('/api/playlists/:id', (req, res) => {
+  const uid = userIdOf(req);
+  const id = parseInt(req.params.id, 10);
+  const exists = db.prepare(
+    'SELECT id FROM user_playlists WHERE id=? AND user_id=?'
+  ).get(id, uid);
+  if (!exists) return res.status(404).json({ error: '歌单不存在或无权限' });
+
+  const updates = [];
+  const args = [];
+  if (typeof req.body?.name === 'string') {
+    const name = req.body.name.trim().slice(0, 50);
+    if (!name) return res.status(400).json({ error: 'name 不能为空字符串' });
+    updates.push('name = ?'); args.push(name);
+  }
+  if (typeof req.body?.mode === 'string') {
+    if (!RADIO_MODES[req.body.mode]) return res.status(400).json({ error: 'mode 非法' });
+    updates.push('mode = ?'); args.push(req.body.mode);
+  }
+  if (updates.length === 0) return res.status(400).json({ error: '至少一个字段' });
+  updates.push('updated_at = CURRENT_TIMESTAMP');
+  args.push(id);
+  db.prepare(`UPDATE user_playlists SET ${updates.join(', ')} WHERE id=?`).run(...args);
+  res.json({ ok: true });
+});
+
 // ========== 电台情绪 (current_mood) ==========
 // 优先级链：用户主动输入 > 跟 DJ 聊天上下文 > 最近一小时播放行为
 // 存储格式：{ mood, genre, message, source: 'user'|'chat'|'playback', set_at: ISO, user_input?: string }
