@@ -2164,6 +2164,32 @@ app.post('/api/playlists/:id/songs', (req, res) => {
   res.json({ ok: true, position: newPos });
 });
 
+// 删第 N 位歌曲，后面歌曲 position - 1
+app.delete('/api/playlists/:id/songs/:position', (req, res) => {
+  const uid = userIdOf(req);
+  const id = parseInt(req.params.id, 10);
+  const pos = parseInt(req.params.position, 10);
+
+  const exists = db.prepare(
+    'SELECT id FROM user_playlists WHERE id=? AND user_id=?'
+  ).get(id, uid);
+  if (!exists) return res.status(404).json({ error: '歌单不存在或无权限' });
+
+  const tx = db.transaction(() => {
+    const r = db.prepare(
+      'DELETE FROM user_playlist_songs WHERE playlist_id=? AND position=?'
+    ).run(id, pos);
+    if (r.changes === 0) return false;
+    db.prepare(
+      'UPDATE user_playlist_songs SET position = position - 1 WHERE playlist_id=? AND position > ?'
+    ).run(id, pos);
+    db.prepare('UPDATE user_playlists SET updated_at=CURRENT_TIMESTAMP WHERE id=?').run(id);
+    return true;
+  });
+  if (!tx()) return res.status(404).json({ error: 'position 不存在' });
+  res.json({ ok: true });
+});
+
 // ========== 电台情绪 (current_mood) ==========
 // 优先级链：用户主动输入 > 跟 DJ 聊天上下文 > 最近一小时播放行为
 // 存储格式：{ mood, genre, message, source: 'user'|'chat'|'playback', set_at: ISO, user_input?: string }
