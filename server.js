@@ -2190,6 +2190,39 @@ app.delete('/api/playlists/:id/songs/:position', (req, res) => {
   res.json({ ok: true });
 });
 
+// 重排 { songIds: ['id1','id2',...] }，长度必须 = 现有 song count，
+// 元素必须就是当前所有 song_id 的一个排列
+app.patch('/api/playlists/:id/reorder', (req, res) => {
+  const uid = userIdOf(req);
+  const id = parseInt(req.params.id, 10);
+  const songIds = Array.isArray(req.body?.songIds) ? req.body.songIds.map(String) : null;
+  if (!songIds) return res.status(400).json({ error: 'songIds 必填且为字符串数组' });
+
+  const exists = db.prepare(
+    'SELECT id FROM user_playlists WHERE id=? AND user_id=?'
+  ).get(id, uid);
+  if (!exists) return res.status(404).json({ error: '歌单不存在或无权限' });
+
+  const current = db.prepare(
+    'SELECT song_id FROM user_playlist_songs WHERE playlist_id=?'
+  ).all(id).map(r => r.song_id);
+  if (current.length !== songIds.length || !current.every(x => songIds.includes(x))) {
+    return res.status(400).json({ error: 'songIds 必须刚好是当前歌单所有 song_id 的一个排列' });
+  }
+
+  const tx = db.transaction(() => {
+    // 用临时负数 position 避免 PRIMARY KEY 冲突
+    db.prepare('UPDATE user_playlist_songs SET position = -position - 1 WHERE playlist_id=?').run(id);
+    const stmt = db.prepare(
+      'UPDATE user_playlist_songs SET position = ? WHERE playlist_id=? AND song_id=?'
+    );
+    songIds.forEach((sid, i) => stmt.run(i, id, sid));
+    db.prepare('UPDATE user_playlists SET updated_at=CURRENT_TIMESTAMP WHERE id=?').run(id);
+  });
+  tx();
+  res.json({ ok: true });
+});
+
 // ========== 电台情绪 (current_mood) ==========
 // 优先级链：用户主动输入 > 跟 DJ 聊天上下文 > 最近一小时播放行为
 // 存储格式：{ mood, genre, message, source: 'user'|'chat'|'playback', set_at: ISO, user_input?: string }
